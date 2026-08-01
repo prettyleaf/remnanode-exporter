@@ -1,0 +1,36 @@
+<clickhouse>
+    <!-- The exporter is a single writer with modest batches; the stock
+         settings are tuned for much larger clusters. -->
+    <logger>
+        <level>warning</level>
+        <size>100M</size>
+        <count>3</count>
+    </logger>
+
+    <!-- Keep the server's own telemetry from outgrowing the data we collect. -->
+    <query_log>
+        <database>system</database>
+        <table>query_log</table>
+        <ttl>event_date + INTERVAL 14 DAY DELETE</ttl>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+    </query_log>
+    <trace_log remove="1"/>
+    <metric_log remove="1"/>
+    <asynchronous_metric_log remove="1"/>
+    <session_log remove="1"/>
+    <part_log remove="1"/>
+
+    <!-- background_pool_size is deliberately left at its default: lowering it
+         trips the startup sanity check against
+         number_of_free_entries_in_pool_to_execute_mutation and the server
+         refuses to boot. -->
+    <max_concurrent_queries>50</max_concurrent_queries>
+
+    <!-- ClickHouse normally assumes it owns the machine and will happily take
+         90% of RAM. Here it shares a box with the panel, Postgres and Valkey,
+         so it gets a third and the stock 5 GiB mark cache is cut to 512 MiB.
+         Running on a dedicated server? Raise both. -->
+    <max_server_memory_usage_to_ram_ratio>0.33</max_server_memory_usage_to_ram_ratio>
+    <mark_cache_size>536870912</mark_cache_size>
+    <uncompressed_cache_size>0</uncompressed_cache_size>
+</clickhouse>

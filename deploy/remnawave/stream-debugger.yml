@@ -1,0 +1,36 @@
+# Drop-in for the Remnawave stack's own docker-compose.yml.
+#
+# The debugger prints every message the panel publishes to the export streams,
+# which is the fastest way to confirm EXPORT_TO_STREAM_ENABLED is actually on
+# before you start blaming the exporter.
+#
+#   docker compose -f docker-compose.yml -f stream-debugger.yml up -d rw-stream-debugger
+#   docker logs -f rw-stream-debugger
+#
+# Remove it once the data shows up in ClickHouse — it is a debugging tool, not
+# something to leave running.
+
+services:
+  rw-stream-debugger:
+    image: remnawave/stream-debugger:latest
+    container_name: rw-stream-debugger
+    hostname: rw-stream-debugger
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - valkey-socket:/var/run/valkey
+    depends_on:
+      remnawave-db:
+        condition: service_healthy
+      remnawave-redis:
+        condition: service_healthy
+      remnawave:
+        condition: service_healthy
+    networks:
+      - remnawave-network
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

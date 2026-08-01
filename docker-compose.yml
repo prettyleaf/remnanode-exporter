@@ -1,0 +1,107 @@
+services:
+  exporter:
+    build:
+      context: .
+    image: remnanode-exporter:latest
+    container_name: remnanode-exporter
+    hostname: remnanode-exporter
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      CLICKHOUSE_ADDR: clickhouse:9000
+      GEOIP_CITY_DB: /geoip/GeoLite2-City.mmdb
+      GEOIP_ASN_DB: /geoip/GeoLite2-ASN.mmdb
+    ports:
+      # Self-telemetry for vmagent. 9101 is skipped on purpose: cAdvisor is
+      # already there in the standard Remnawave monitoring setup.
+      - "${METRICS_BIND:-127.0.0.1}:9102:9102"
+    volumes:
+      # The Remnawave stack exposes Valkey over a unix socket in this volume.
+      - valkey-socket:/var/run/valkey
+      - geoip:/geoip:ro
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    networks:
+      - internal
+      - remnawave
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.12-alpine
+    container_name: remnanode-clickhouse
+    hostname: clickhouse
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-remnawave}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      # Published so your Grafana can reach it. See CLICKHOUSE_BIND in .env.
+      - "${CLICKHOUSE_BIND:-127.0.0.1}:9000:9000"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - clickhouse-logs:/var/log/clickhouse-server
+      - ./deploy/clickhouse/config.d:/etc/clickhouse-server/config.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user $${CLICKHOUSE_USER} --password $${CLICKHOUSE_PASSWORD} --query 'SELECT 1' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    networks:
+      - internal
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Keeps the MaxMind databases fresh. Needs a free GeoLite2 account:
+  # https://www.maxmind.com/en/geolite2/signup
+  geoipupdate:
+    image: ghcr.io/maxmind/geoipupdate:v7
+    container_name: remnanode-geoipupdate
+    restart: unless-stopped
+    environment:
+      GEOIPUPDATE_ACCOUNT_ID: ${MAXMIND_ACCOUNT_ID:?set MAXMIND_ACCOUNT_ID in .env}
+      GEOIPUPDATE_LICENSE_KEY: ${MAXMIND_LICENSE_KEY:?set MAXMIND_LICENSE_KEY in .env}
+      GEOIPUPDATE_EDITION_IDS: GeoLite2-City GeoLite2-ASN
+      GEOIPUPDATE_FREQUENCY: "24"
+    volumes:
+      - geoip:/usr/share/GeoIP
+    networks:
+      - internal
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  clickhouse-data:
+  clickhouse-logs:
+  geoip:
+  # Created by the Remnawave stack. Check the exact name with:
+  #   docker volume ls | grep valkey
+  valkey-socket:
+    external: true
+    name: ${VALKEY_SOCKET_VOLUME:-remnawave_valkey-socket}
+
+networks:
+  internal:
+    driver: bridge
+  # Created by the Remnawave stack. Check the exact name with:
+  #   docker network ls
+  remnawave:
+    external: true
+    name: ${REMNAWAVE_NETWORK:-remnawave-network}

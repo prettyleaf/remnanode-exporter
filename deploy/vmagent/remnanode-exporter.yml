@@ -1,0 +1,18 @@
+# Scrape config for the exporter's own health metrics.
+#
+# Drop this into /opt/monitoring/vmagent/conf.d/ on the panel server — the same
+# place the cAdvisor, node_exporter and remnawave jobs live. vmagent picks it up
+# within promscrape.configCheckInterval (60s), no restart needed.
+#
+# This is the exporter's self-telemetry, not the traffic data: the traffic lives
+# in ClickHouse and is read straight from Grafana. The one series worth an alert
+# is remnanode_exporter_stream_pending — if it keeps growing, the exporter is
+# falling behind and the panel will start trimming the stream at
+# EXPORT_TO_STREAM_MAXLEN.
+
+- job_name: remnanode_exporter
+  scrape_interval: 15s
+  static_configs:
+    - targets: ['127.0.0.1:9102']
+      labels:
+        instance: "название-инстанса-сервера-панели"
