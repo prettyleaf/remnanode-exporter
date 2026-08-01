@@ -1,4 +1,6 @@
-FROM golang:1.24-alpine AS build
+# The binary is pure Go, so the build stage always runs on the native
+# architecture of the runner and cross-compiles. No QEMU, no per-arch runners.
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS build
 
 WORKDIR /src
 
@@ -8,7 +10,9 @@ RUN go mod download
 
 COPY . .
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -trimpath \
+ARG TARGETOS
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
     -ldflags "-s -w -X main.version=${VERSION}" \
     -o /out/remnanode-exporter ./cmd/remnanode-exporter
 

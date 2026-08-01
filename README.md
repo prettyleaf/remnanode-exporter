@@ -79,10 +79,10 @@ docker logs -f rw-stream-debugger
 не входит — предполагается, что она у тебя уже есть.
 
 ```bash
-git clone <this repo> && cd remnanode-exporter
+git clone https://github.com/prettyleaf/remnanode-exporter && cd remnanode-exporter
 cp .env.example .env
 $EDITOR .env
-docker compose up -d --build
+docker compose up -d
 ```
 
 Имена тома и сети Remnawave зависят от имени compose-проекта, так что проверь

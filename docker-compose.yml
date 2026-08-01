@@ -1,8 +1,6 @@
 services:
   exporter:
-    build:
-      context: .
-    image: remnanode-exporter:latest
+    image: ghcr.io/prettyleaf/remnanode-exporter:latest
     container_name: remnanode-exporter
     hostname: remnanode-exporter
     restart: unless-stopped
