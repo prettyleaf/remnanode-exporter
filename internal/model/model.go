@@ -1,7 +1,7 @@
-// Package model parses the raw Redis Stream payloads published by Remnawave 3.x
+// Package model parses the raw Redis Stream payloads published by Remnawave 3.1
 // when EXPORT_TO_STREAM_ENABLED=true.
 //
-// Schemas are taken verbatim from @remnawave/backend-contract@3.0.0
+// Schemas are taken verbatim from @remnawave/backend-contract@3.1.1
 // (models/export-stream/export-stream.schema.ts):
 //
 //	ioraw:export:user_usage           RemnawaveUserUsageStreamMessageDto
@@ -46,6 +46,13 @@ type SubRequest struct {
 	UserID    uint64
 	IP        string
 	UserAgent string
+	// ResponseType is what the Subscription Response Rules engine served:
+	// a template name (XRAY_JSON, SINGBOX, …) or a refusal (BLOCK,
+	// STATUS_CODE_404, STATUS_CODE_451, SOCKET_DROP). Empty on panels older
+	// than 3.1.0.
+	ResponseType string
+	// RuleName is the response rule that matched, empty when none did.
+	RuleName string
 }
 
 // ConnIP is one address a user was seen connecting from.
@@ -81,6 +88,16 @@ func (f Fields) str(key string) (string, bool) {
 		return fmt.Sprint(v), true
 	}
 	return s, true
+}
+
+// firstStr returns the value of the first key that carries one.
+func (f Fields) firstStr(keys ...string) string {
+	for _, key := range keys {
+		if s, ok := f.str(key); ok && s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 func (f Fields) required(key string) (string, error) {
@@ -181,7 +198,9 @@ func parseRecords(raw string) ([]UsageRecord, error) {
 }
 
 // ParseSubRequest decodes a subscription_requests entry.
-// requestIp and userAgent are optional and omitted when unknown.
+// Everything but the version, the user and the timestamp is optional:
+// requestIp and userAgent are omitted when unknown, and the SRR fields are
+// absent altogether on panels older than 3.1.0.
 func ParseSubRequest(f Fields) (SubRequest, error) {
 	var out SubRequest
 	if err := f.checkVersion(); err != nil {
@@ -197,7 +216,19 @@ func ParseSubRequest(f Fields) (SubRequest, error) {
 	}
 	ip, _ := f.str("requestIp")
 	ua, _ := f.str("userAgent")
-	out = SubRequest{RequestAt: at, UserID: userID, IP: ip, UserAgent: ua}
+	rule, _ := f.str("srrRuleName")
+	out = SubRequest{
+		RequestAt: at,
+		UserID:    userID,
+		IP:        ip,
+		UserAgent: ua,
+		// The contract calls this srrResponseType, but the panel writes
+		// ssrResponseType — a transposition in the queue processor that is
+		// still there in backend 3.1.0. Prefer what actually lands on the
+		// wire and accept the contract spelling once it gets fixed.
+		ResponseType: f.firstStr("ssrResponseType", "srrResponseType"),
+		RuleName:     rule,
+	}
 	return out, nil
 }
 

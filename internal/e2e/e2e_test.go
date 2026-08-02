@@ -108,6 +108,80 @@ func TestSchemaAndPipeline(t *testing.T) {
 	if scripted == 0 {
 		t.Error("expected the curl subscription fetch to be counted as scripted")
 	}
+
+	var blocked uint64
+	if err := w.Conn().QueryRow(ctx, fmt.Sprintf(
+		"SELECT sum(blocked) FROM %s.sub_req_5m WHERE user_id = 1001", testDB())).Scan(&blocked); err != nil {
+		t.Fatalf("read sub_req_5m: %v", err)
+	}
+	if blocked == 0 {
+		t.Error("expected the fetches a response rule refused to be counted as blocked")
+	}
+}
+
+// TestSchemaUpgradesExistingTables covers the path a released exporter takes on
+// an existing ClickHouse volume: the CREATE statements are no-ops there, so the
+// columns added for Remnawave 3.1 only appear if the ALTERs run.
+func TestSchemaUpgradesExistingTables(t *testing.T) {
+	w, log := connect(t)
+	ctx := context.Background()
+
+	// The materialised view reads all three columns, so it goes back to its
+	// pre-3.1 shape first.
+	if err := w.Exec(ctx, fmt.Sprintf(`ALTER TABLE %s.sub_req_5m_mv MODIFY QUERY
+SELECT
+    toStartOfFiveMinute(ts) AS ts5,
+    user_id,
+    count() AS requests,
+    uniqState(ip) AS ips,
+    uniqState(ip_prefix) AS prefixes,
+    uniqState(asn) AS asns,
+    uniqStateIf(country, country != '') AS countries,
+    uniqState(user_agent) AS uas,
+    countIf(ua_kind IN ('script', 'bot')) AS scripted
+FROM %s.sub_requests
+GROUP BY ts5, user_id`, testDB(), testDB())); err != nil {
+		t.Fatalf("revert sub_req_5m_mv: %v", err)
+	}
+
+	dropped := []struct{ table, column string }{
+		{"sub_requests", "srr_response_type"},
+		{"sub_requests", "srr_rule_name"},
+		{"sub_req_5m", "blocked"},
+	}
+	for _, d := range dropped {
+		if err := w.Exec(ctx, fmt.Sprintf("ALTER TABLE %s.%s DROP COLUMN IF EXISTS %s",
+			testDB(), d.table, d.column)); err != nil {
+			t.Fatalf("drop %s.%s: %v", d.table, d.column, err)
+		}
+	}
+
+	if err := schema.Apply(ctx, w, log); err != nil {
+		t.Fatalf("re-apply schema: %v", err)
+	}
+
+	for _, d := range dropped {
+		var n uint64
+		if err := w.Conn().QueryRow(ctx,
+			"SELECT count() FROM system.columns WHERE database = ? AND table = ? AND name = ?",
+			testDB(), d.table, d.column).Scan(&n); err != nil {
+			t.Fatalf("read system.columns: %v", err)
+		}
+		if n != 1 {
+			t.Errorf("%s.%s was not restored by the schema upgrade", d.table, d.column)
+		}
+	}
+
+	// The rollup has to be recording refused fetches again.
+	seed(ctx, t, w, log)
+	var blocked uint64
+	if err := w.Conn().QueryRow(ctx, fmt.Sprintf(
+		"SELECT sum(blocked) FROM %s.sub_req_5m", testDB())).Scan(&blocked); err != nil {
+		t.Fatalf("read sub_req_5m: %v", err)
+	}
+	if blocked == 0 {
+		t.Error("the upgraded materialised view is not counting blocked fetches")
+	}
 }
 
 // TestAbuseViewRanksTheSharedAccountFirst checks the scoring actually works.
@@ -315,14 +389,18 @@ func seed(ctx context.Context, t *testing.T, w *sink.Writer, log *slog.Logger) {
 		insert(subs, model.Fields{
 			"v": "1", "userId": "1001", "requestAt": stamp(off),
 			"requestIp": "8.8.8.8", "userAgent": "curl/8.5.0",
+			// Panels write the transposed spelling; see model.ParseSubRequest.
+			"ssrResponseType": "BLOCK", "srrRuleName": "block-legacy-clients",
 		})
 		insert(subs, model.Fields{
 			"v": "1", "userId": "1001", "requestAt": stamp(off + time.Minute),
 			"requestIp": "1.1.1.1", "userAgent": "python-requests/2.31.0",
+			"ssrResponseType": "SOCKET_DROP", "srrRuleName": "block-legacy-clients",
 		})
 		insert(subs, model.Fields{
 			"v": "1", "userId": "1002", "requestAt": stamp(off),
 			"requestIp": "77.88.55.70", "userAgent": "Happ/1.24.0",
+			"ssrResponseType": "XRAY_JSON",
 		})
 	}
 

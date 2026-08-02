@@ -487,7 +487,7 @@
           "editorType": "sql",
           "format": 1,
           "pluginVersion": "4.5.1",
-          "rawSql": "SELECT\n    username,\n    status,\n    tag,\n    score,\n    gigabytes,\n    prefixes AS networks,\n    countries,\n    asns,\n    hosting_ips,\n    nodes,\n    ips,\n    sub_requests,\n    sub_uas,\n    hwid_device_limit\nFROM remnawave.v_user_abuse(from = $__fromTime, to = $__toTime)\nWHERE score > 0\nORDER BY score DESC\nLIMIT 200"
+          "rawSql": "SELECT\n    username,\n    status,\n    tag,\n    score,\n    gigabytes,\n    prefixes AS networks,\n    countries,\n    asns,\n    hosting_ips,\n    nodes,\n    ips,\n    sub_requests,\n    sub_uas,\n    sub_blocked,\n    hwid_device_limit\nFROM remnawave.v_user_abuse(from = $__fromTime, to = $__toTime)\nWHERE score > 0\nORDER BY score DESC\nLIMIT 200"
         }
       ],
       "fieldConfig": {

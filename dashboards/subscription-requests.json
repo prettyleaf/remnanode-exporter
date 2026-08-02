@@ -598,6 +598,156 @@
       }
     },
     {
+      "id": 12,
+      "type": "piechart",
+      "title": "Response types",
+      "description": "Which subscription response rule fired. Needs Remnawave 3.1.0 or newer.",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${ds}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 8,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${ds}"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "pluginVersion": "4.5.1",
+          "rawSql": "SELECT srr_response_type, count() AS requests\nFROM remnawave.sub_requests\nWHERE $__timeFilter(ts) AND srr_response_type != ''\nGROUP BY srr_response_type\nORDER BY requests DESC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "pieType": "donut",
+        "displayLabels": [
+          "percent"
+        ],
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "values": [
+            "value"
+          ]
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 13,
+      "type": "table",
+      "title": "Refused fetches by rule",
+      "description": "Requests a response rule answered with BLOCK, 404, 451 or a dropped socket.",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${ds}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 13,
+        "w": 16,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${ds}"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "pluginVersion": "4.5.1",
+          "rawSql": "SELECT\n    if(srr_rule_name = '', '(unnamed)', srr_rule_name) AS rule,\n    srr_response_type,\n    count() AS requests,\n    uniqExact(user_id) AS accounts,\n    uniqExact(ua_family) AS clients,\n    max(ts) AS last_seen\nFROM remnawave.v_sub_requests\nWHERE $__timeFilter(ts) AND is_blocked\nGROUP BY rule, srr_response_type\nORDER BY requests DESC\nLIMIT 100"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true,
+            "inspect": false
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "last_seen"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "fields": ""
+        },
+        "cellHeight": "sm",
+        "sortBy": []
+      }
+    },
+    {
       "id": 20,
       "type": "table",
       "title": "Subscription-fetch offenders",
@@ -608,7 +758,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 13,
+        "y": 23,
         "w": 24,
         "h": 12
       },
@@ -622,7 +772,7 @@
           "editorType": "sql",
           "format": 1,
           "pluginVersion": "4.5.1",
-          "rawSql": "SELECT\n    username,\n    status,\n    count() AS requests,\n    uniqExact(ip) AS ips,\n    uniqExact(ip_prefix) AS networks,\n    uniqExact(country) AS countries,\n    uniqExact(user_agent) AS user_agents,\n    countIf(ua_kind IN ('script', 'bot')) AS scripted,\n    countIf(is_hosting = 1) AS from_hosting,\n    max(ts) AS last_seen\nFROM remnawave.v_sub_requests\nWHERE $__timeFilter(ts)\nGROUP BY username, status\nORDER BY requests DESC\nLIMIT 200"
+          "rawSql": "SELECT\n    username,\n    status,\n    count() AS requests,\n    uniqExact(ip) AS ips,\n    uniqExact(ip_prefix) AS networks,\n    uniqExact(country) AS countries,\n    uniqExact(user_agent) AS user_agents,\n    countIf(ua_kind IN ('script', 'bot')) AS scripted,\n    countIf(is_hosting = 1) AS from_hosting,\n    countIf(is_blocked) AS refused,\n    max(ts) AS last_seen\nFROM remnawave.v_sub_requests\nWHERE $__timeFilter(ts)\nGROUP BY username, status\nORDER BY requests DESC\nLIMIT 200"
         }
       ],
       "fieldConfig": {
@@ -821,7 +971,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 25,
+        "y": 35,
         "w": 8,
         "h": 10
       },
@@ -891,7 +1041,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 25,
+        "y": 35,
         "w": 8,
         "h": 10
       },
@@ -961,7 +1111,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 25,
+        "y": 35,
         "w": 8,
         "h": 10
       },
@@ -1059,7 +1209,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 35,
+        "y": 45,
         "w": 24,
         "h": 11
       },
@@ -1073,7 +1223,7 @@
           "editorType": "sql",
           "format": 1,
           "pluginVersion": "4.5.1",
-          "rawSql": "SELECT\n    ts,\n    username,\n    ip,\n    country,\n    city,\n    as_org,\n    ua_family,\n    ua_kind,\n    user_agent\nFROM remnawave.v_sub_requests\nWHERE $__timeFilter(ts)\nORDER BY ts DESC\nLIMIT 500"
+          "rawSql": "SELECT\n    ts,\n    username,\n    ip,\n    country,\n    city,\n    as_org,\n    ua_family,\n    ua_kind,\n    srr_response_type,\n    srr_rule_name,\n    user_agent\nFROM remnawave.v_sub_requests\nWHERE $__timeFilter(ts)\nORDER BY ts DESC\nLIMIT 500"
         }
       ],
       "fieldConfig": {

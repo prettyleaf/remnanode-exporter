@@ -22,7 +22,8 @@ CREATE TABLE b (y UInt8) ENGINE = Memory;
 }
 
 // The embedded DDL must survive the naive splitter, so no statement may carry a
-// literal semicolon and every {db} placeholder has to be substitutable.
+// literal semicolon and every {db} placeholder has to be substitutable. It also
+// runs on every start, so every statement has to be idempotent.
 func TestEmbeddedSQLIsWellFormed(t *testing.T) {
 	entries, err := files.ReadDir("sql")
 	if err != nil {
@@ -46,11 +47,21 @@ func TestEmbeddedSQLIsWellFormed(t *testing.T) {
 				t.Errorf("%s: unsubstituted placeholder in %.60s", e.Name(), s)
 			}
 			upper := strings.ToUpper(s)
-			if !strings.HasPrefix(upper, "CREATE") {
+			switch {
+			case strings.HasPrefix(upper, "CREATE TABLE"), strings.HasPrefix(upper, "CREATE MATERIALIZED VIEW"):
+				if !strings.Contains(upper, "IF NOT EXISTS") {
+					t.Errorf("%s: must be idempotent: %.60s", e.Name(), s)
+				}
+			case strings.HasPrefix(upper, "CREATE OR REPLACE VIEW"):
+			// Upgrades for databases an older exporter created. MODIFY QUERY
+			// simply overwrites, ADD COLUMN has to opt out explicitly.
+			case strings.Contains(upper, "MODIFY QUERY"):
+			case strings.Contains(upper, "ADD COLUMN"):
+				if !strings.Contains(upper, "IF NOT EXISTS") {
+					t.Errorf("%s: must be idempotent: %.60s", e.Name(), s)
+				}
+			default:
 				t.Errorf("%s: unexpected statement %.60s", e.Name(), s)
-			}
-			if strings.HasPrefix(upper, "CREATE TABLE") && !strings.Contains(upper, "IF NOT EXISTS") {
-				t.Errorf("%s: CREATE TABLE must be idempotent: %.60s", e.Name(), s)
 			}
 		}
 	}

@@ -48,6 +48,7 @@ func TestParseUserUsageRejectsBadInput(t *testing.T) {
 }
 
 func TestParseSubRequestOptionalFields(t *testing.T) {
+	// A panel older than 3.1.0 sends neither the client nor the SRR fields.
 	msg, err := ParseSubRequest(Fields{
 		"v":         "1",
 		"userId":    "9001",
@@ -58,6 +59,9 @@ func TestParseSubRequestOptionalFields(t *testing.T) {
 	}
 	if msg.UserID != 9001 || msg.IP != "" || msg.UserAgent != "" {
 		t.Errorf("unexpected message %+v", msg)
+	}
+	if msg.ResponseType != "" || msg.RuleName != "" {
+		t.Errorf("expected no SRR fields, got %+v", msg)
 	}
 
 	msg, err = ParseSubRequest(Fields{
@@ -72,6 +76,38 @@ func TestParseSubRequestOptionalFields(t *testing.T) {
 	}
 	if msg.IP != "1.2.3.4" || msg.UserAgent != "Happ/1.0" {
 		t.Errorf("unexpected message %+v", msg)
+	}
+}
+
+// The panel writes ssrResponseType, the contract calls the field
+// srrResponseType. Both have to land in ResponseType.
+func TestParseSubRequestResponseRules(t *testing.T) {
+	base := func() Fields {
+		return Fields{
+			"v":           "1",
+			"userId":      "9001",
+			"requestAt":   "2026-07-16T11:59:30.500Z",
+			"srrRuleName": "block-legacy-clients",
+		}
+	}
+
+	onWire := base()
+	onWire["ssrResponseType"] = "BLOCK"
+
+	perContract := base()
+	perContract["srrResponseType"] = "BLOCK"
+
+	for name, f := range map[string]Fields{"panel spelling": onWire, "contract spelling": perContract} {
+		msg, err := ParseSubRequest(f)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", name, err)
+		}
+		if msg.ResponseType != "BLOCK" {
+			t.Errorf("%s: ResponseType = %q, want BLOCK", name, msg.ResponseType)
+		}
+		if msg.RuleName != "block-legacy-clients" {
+			t.Errorf("%s: RuleName = %q", name, msg.RuleName)
+		}
 	}
 }
 

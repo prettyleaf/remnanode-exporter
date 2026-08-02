@@ -19,8 +19,9 @@ import (
 //go:embed sql/*.sql
 var files embed.FS
 
-// Apply runs every embedded statement in file-name order. All statements are
-// IF NOT EXISTS, so this is safe to run on every start.
+// Apply runs every embedded statement in file-name order. Every statement is
+// idempotent — CREATE ... IF NOT EXISTS for the current shape, ALTER for the
+// columns an older exporter did not create — so this is safe on every start.
 func Apply(ctx context.Context, w *sink.Writer, log *slog.Logger) error {
 	entries, err := files.ReadDir("sql")
 	if err != nil {

@@ -28,7 +28,12 @@ CREATE TABLE IF NOT EXISTS {db}.sub_requests
     is_hosting UInt8,
     user_agent String CODEC(ZSTD(1)),
     ua_family  LowCardinality(String),
-    ua_kind    LowCardinality(String)
+    ua_kind    LowCardinality(String),
+    -- What the Subscription Response Rules engine served (Remnawave 3.1+):
+    -- a template name (XRAY_JSON, SINGBOX, …) or a refusal (BLOCK,
+    -- STATUS_CODE_404, STATUS_CODE_451, SOCKET_DROP). Empty on older panels.
+    srr_response_type LowCardinality(String),
+    srr_rule_name     LowCardinality(String)
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(ts)
@@ -84,3 +89,14 @@ CREATE TABLE IF NOT EXISTS {db}.dim_nodes
 )
 ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY node_id;
+
+-- Upgrades for databases created by an older exporter. CREATE TABLE IF NOT
+-- EXISTS is a no-op on a table that already exists, so columns added later
+-- have to be applied separately. They land before 02_rollups.sql, which reads
+-- them from the materialised views.
+
+ALTER TABLE {db}.sub_requests
+    ADD COLUMN IF NOT EXISTS srr_response_type LowCardinality(String) AFTER ua_kind;
+
+ALTER TABLE {db}.sub_requests
+    ADD COLUMN IF NOT EXISTS srr_rule_name LowCardinality(String) AFTER srr_response_type;

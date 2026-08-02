@@ -39,6 +39,7 @@ func TestSubRequestDecoderRowShape(t *testing.T) {
 	rows, err := d.Decode(model.Fields{
 		"v": "1", "userId": "77", "requestAt": "2026-07-16T11:59:30.000Z",
 		"requestIp": "1.2.3.4", "userAgent": "curl/8.5.0",
+		"ssrResponseType": "SOCKET_DROP", "srrRuleName": "block-scripts",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -51,6 +52,9 @@ func TestSubRequestDecoderRowShape(t *testing.T) {
 	}
 	if rows[0][11] != "script" {
 		t.Errorf("ua_kind = %v, want script", rows[0][11])
+	}
+	if rows[0][12] != "SOCKET_DROP" || rows[0][13] != "block-scripts" {
+		t.Errorf("srr columns = %v, %v", rows[0][12], rows[0][13])
 	}
 }
 

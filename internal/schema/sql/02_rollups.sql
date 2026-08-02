@@ -68,12 +68,23 @@ CREATE TABLE IF NOT EXISTS {db}.sub_req_5m
     asns      AggregateFunction(uniq, UInt32),
     countries AggregateFunction(uniq, String),
     uas       AggregateFunction(uniq, String),
-    scripted  SimpleAggregateFunction(sum, UInt64)
+    scripted  SimpleAggregateFunction(sum, UInt64),
+    -- Fetches a response rule refused to serve. A client that keeps hitting a
+    -- rule it cannot pass is either misconfigured or not the intended client.
+    blocked   SimpleAggregateFunction(sum, UInt64)
 )
 ENGINE = AggregatingMergeTree
 PARTITION BY toYYYYMM(ts5)
 ORDER BY (user_id, ts5)
 TTL ts5 + INTERVAL 180 DAY;
+
+-- Upgrade for a rollup an older exporter created. It has to run here rather
+-- than at the end of the file: ClickHouse analyses the SELECT of the
+-- materialised view below before IF NOT EXISTS gets a chance to skip it, and
+-- that analysis fails while the target table is still missing the column.
+
+ALTER TABLE {db}.sub_req_5m
+    ADD COLUMN IF NOT EXISTS blocked SimpleAggregateFunction(sum, UInt64) AFTER scripted;
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS {db}.sub_req_5m_mv TO {db}.sub_req_5m AS
 SELECT
@@ -85,6 +96,26 @@ SELECT
     uniqState(asn) AS asns,
     uniqStateIf(country, country != '') AS countries,
     uniqState(user_agent) AS uas,
-    countIf(ua_kind IN ('script', 'bot')) AS scripted
+    countIf(ua_kind IN ('script', 'bot')) AS scripted,
+    countIf(srr_response_type IN ('BLOCK', 'STATUS_CODE_404', 'STATUS_CODE_451', 'SOCKET_DROP')) AS blocked
+FROM {db}.sub_requests
+GROUP BY ts5, user_id;
+
+-- ...and the view an older exporter created still carries its old query, which
+-- CREATE IF NOT EXISTS above left alone. Rewriting it with the same text is a
+-- no-op on a database that is already current.
+
+ALTER TABLE {db}.sub_req_5m_mv MODIFY QUERY
+SELECT
+    toStartOfFiveMinute(ts) AS ts5,
+    user_id,
+    count() AS requests,
+    uniqState(ip) AS ips,
+    uniqState(ip_prefix) AS prefixes,
+    uniqState(asn) AS asns,
+    uniqStateIf(country, country != '') AS countries,
+    uniqState(user_agent) AS uas,
+    countIf(ua_kind IN ('script', 'bot')) AS scripted,
+    countIf(srr_response_type IN ('BLOCK', 'STATUS_CODE_404', 'STATUS_CODE_451', 'SOCKET_DROP')) AS blocked
 FROM {db}.sub_requests
 GROUP BY ts5, user_id;

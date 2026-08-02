@@ -35,18 +35,10 @@ type Config struct {
 	GeoIPASNPath  string
 	GeoIPReload   time.Duration
 
-	// Remnawave panel API, used to resolve numeric user ids to usernames.
-	APIURL   string
-	APIToken string
-	// Postgres DSN of the panel database. The public API does not expose the
-	// numeric node id that the streams carry, so node names can only be
-	// resolved here. Optional.
-	PostgresDSN string
-	// NodesSQL overrides the query used to read the node id/uuid/name mapping.
-	NodesSQL string
-	// NodeNames is a static "id:name,id:name" fallback for deployments that do
-	// not want to expose the panel database to the exporter.
-	NodeNames   string
+	// Remnawave panel API, used to resolve the numeric user and node ids the
+	// streams carry into names. Node ids need a panel on 3.1.0 or newer.
+	APIURL      string
+	APIToken    string
 	DictRefresh time.Duration
 
 	MetricsAddr string
@@ -83,9 +75,6 @@ func Load() (Config, error) {
 
 		APIURL:      strings.TrimRight(env("REMNAWAVE_API_URL", ""), "/"),
 		APIToken:    env("REMNAWAVE_API_TOKEN", ""),
-		PostgresDSN: env("REMNAWAVE_POSTGRES_DSN", ""),
-		NodesSQL:    env("REMNAWAVE_NODES_SQL", "SELECT id, uuid::text, name, country_code FROM public.nodes"),
-		NodeNames:   env("NODE_NAMES", ""),
 		DictRefresh: envDuration("DICT_REFRESH_INTERVAL", 5*time.Minute),
 
 		// 9101 is deliberately avoided: the common Remnawave monitoring setup

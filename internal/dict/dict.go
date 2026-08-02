@@ -1,10 +1,9 @@
 // Package dict keeps ClickHouse dimension tables in sync with the panel, so
 // dashboards can show usernames and node names instead of bare numeric ids.
 //
-// Users come from the public API (/api/users/stream exposes the same numeric
-// id the streams carry). Node names are only available in the panel database:
-// the REST API identifies nodes by uuid and never returns the bigint id that
-// the export streams use.
+// Both dimensions come from the public API: /api/users/stream and /api/nodes
+// expose the same numeric ids the export streams carry. The node id was added
+// in Remnawave 3.1.0; against an older panel the nodes stay unnamed.
 package dict
 
 import (
@@ -13,11 +12,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 
 	"remnanode-exporter/internal/metrics"
 	"remnanode-exporter/internal/sink"
@@ -31,12 +27,9 @@ const (
 
 // Options configures the syncer.
 type Options struct {
-	APIURL      string
-	APIToken    string
-	PostgresDSN string
-	NodesSQL    string
-	NodeNames   string
-	Interval    time.Duration
+	APIURL   string
+	APIToken string
+	Interval time.Duration
 }
 
 // Syncer refreshes the dimension tables on an interval.
@@ -74,6 +67,9 @@ func (s *Syncer) Run(ctx context.Context) error {
 }
 
 func (s *Syncer) syncAll(ctx context.Context) {
+	if s.opt.APIURL == "" || s.opt.APIToken == "" {
+		return // no panel credentials: dashboards fall back to numeric ids
+	}
 	if err := s.syncUsers(ctx); err != nil {
 		metrics.DictErrors.WithLabelValues(TableUsers).Inc()
 		s.log.Warn("user dictionary refresh failed", "err", err)
@@ -104,10 +100,6 @@ type usersStreamResponse struct {
 
 // syncUsers pages through /api/users/stream and rewrites dim_users.
 func (s *Syncer) syncUsers(ctx context.Context) error {
-	if s.opt.APIURL == "" || s.opt.APIToken == "" {
-		return nil // dictionary disabled
-	}
-
 	const cols = "user_id, username, status, tag, traffic_limit_bytes, hwid_device_limit, expire_at, updated_at"
 	now := time.Now().UTC()
 	var rows [][]any
@@ -156,28 +148,12 @@ func (s *Syncer) syncUsers(ctx context.Context) error {
 }
 
 func (s *Syncer) fetchUsersPage(ctx context.Context, cursor string) ([]streamUser, string, error) {
-	url := s.opt.APIURL + "/api/users/stream?size=1000"
+	path := "/api/users/stream?size=1000"
 	if cursor != "" {
-		url += "&cursor=" + cursor
+		path += "&cursor=" + cursor
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+s.opt.APIToken)
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := s.http.Do(req)
-	if err != nil {
-		return nil, "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("GET %s: %s", url, resp.Status)
-	}
-
 	var decoded usersStreamResponse
-	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+	if err := s.getJSON(ctx, path, &decoded); err != nil {
 		return nil, "", err
 	}
 	next := ""
@@ -187,87 +163,73 @@ func (s *Syncer) fetchUsersPage(ctx context.Context, cursor string) ([]streamUse
 	return decoded.Response.Users, next, nil
 }
 
-// syncNodes fills dim_nodes from the panel database, or from the static
-// NODE_NAMES map when no DSN is configured.
+// getJSON performs an authenticated GET against the panel API and decodes the
+// body into out.
+func (s *Syncer) getJSON(ctx context.Context, path string, out any) error {
+	url := s.opt.APIURL + path
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+s.opt.APIToken)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("GET %s: %s", url, resp.Status)
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+type apiNode struct {
+	ID          int64  `json:"id"`
+	UUID        string `json:"uuid"`
+	Name        string `json:"name"`
+	CountryCode string `json:"countryCode"`
+}
+
+type nodesResponse struct {
+	Response []apiNode `json:"response"`
+}
+
+// syncNodes rewrites dim_nodes from /api/nodes.
 func (s *Syncer) syncNodes(ctx context.Context) error {
 	cols := []string{"node_id", "uuid", "name", "country_code", "updated_at"}
 	now := time.Now().UTC()
 
-	var rows [][]any
-	switch {
-	case s.opt.PostgresDSN != "":
-		var err error
-		rows, err = s.nodesFromPostgres(ctx, now)
-		if err != nil {
-			return err
+	var decoded nodesResponse
+	if err := s.getJSON(ctx, "/api/nodes", &decoded); err != nil {
+		return err
+	}
+
+	rows := make([][]any, 0, len(decoded.Response))
+	for _, n := range decoded.Response {
+		// Panels older than 3.1.0 do not expose the bigint id the export
+		// streams carry, and it decodes as zero. Such a row would only
+		// mislabel whichever node really is id 0.
+		if n.ID <= 0 {
+			continue
 		}
-	case s.opt.NodeNames != "":
-		rows = nodesFromStatic(s.opt.NodeNames, now)
-	default:
-		return nil
+		rows = append(rows, []any{uint64(n.ID), n.UUID, n.Name, n.CountryCode, now})
 	}
 
 	if len(rows) == 0 {
+		if len(decoded.Response) > 0 {
+			return fmt.Errorf("none of the %d nodes carry a numeric id: node names need Remnawave 3.1.0 or newer",
+				len(decoded.Response))
+		}
 		return nil
 	}
 	if err := s.sink.Insert(ctx, TableNodes, cols, rows); err != nil {
 		return err
 	}
 	metrics.DictSize.WithLabelValues(TableNodes).Set(float64(len(rows)))
+	s.log.Debug("node dictionary refreshed", "nodes", len(rows))
 	return nil
-}
-
-func (s *Syncer) nodesFromPostgres(ctx context.Context, now time.Time) ([][]any, error) {
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-
-	conn, err := pgx.Connect(ctx, s.opt.PostgresDSN)
-	if err != nil {
-		return nil, fmt.Errorf("connect panel db: %w", err)
-	}
-	defer conn.Close(context.WithoutCancel(ctx))
-
-	pgRows, err := conn.Query(ctx, s.opt.NodesSQL)
-	if err != nil {
-		return nil, fmt.Errorf("query nodes: %w", err)
-	}
-	defer pgRows.Close()
-
-	var out [][]any
-	for pgRows.Next() {
-		var (
-			id      int64
-			uuid    string
-			name    string
-			country *string
-		)
-		if err := pgRows.Scan(&id, &uuid, &name, &country); err != nil {
-			return nil, fmt.Errorf("scan node: %w", err)
-		}
-		out = append(out, []any{uint64(id), uuid, name, derefString(country), now})
-	}
-	return out, pgRows.Err()
-}
-
-// nodesFromStatic parses "1:Germany-1,2:NL-2".
-func nodesFromStatic(spec string, now time.Time) [][]any {
-	var out [][]any
-	for _, pair := range strings.Split(spec, ",") {
-		pair = strings.TrimSpace(pair)
-		if pair == "" {
-			continue
-		}
-		idRaw, name, ok := strings.Cut(pair, ":")
-		if !ok {
-			continue
-		}
-		id, err := strconv.ParseUint(strings.TrimSpace(idRaw), 10, 64)
-		if err != nil {
-			continue
-		}
-		out = append(out, []any{id, "", strings.TrimSpace(name), "", now})
-	}
-	return out
 }
 
 func derefString(s *string) string {

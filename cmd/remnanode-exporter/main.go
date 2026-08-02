@@ -1,4 +1,4 @@
-// Command remnanode-exporter ships the Remnawave 3.x Redis export streams into
+// Command remnanode-exporter ships the Remnawave 3.1 Redis export streams into
 // ClickHouse and enriches every address with MaxMind GeoLite2 data.
 package main
 
@@ -122,12 +122,9 @@ func run() error {
 	}()
 
 	syncer := dict.New(dict.Options{
-		APIURL:      cfg.APIURL,
-		APIToken:    cfg.APIToken,
-		PostgresDSN: cfg.PostgresDSN,
-		NodesSQL:    cfg.NodesSQL,
-		NodeNames:   cfg.NodeNames,
-		Interval:    cfg.DictRefresh,
+		APIURL:   cfg.APIURL,
+		APIToken: cfg.APIToken,
+		Interval: cfg.DictRefresh,
 	}, writer, log)
 	wg.Add(1)
 	go func() {

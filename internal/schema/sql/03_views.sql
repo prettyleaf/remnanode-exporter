@@ -72,7 +72,12 @@ SELECT
     s.is_hosting AS is_hosting,
     s.user_agent AS user_agent,
     s.ua_family AS ua_family,
-    s.ua_kind AS ua_kind
+    s.ua_kind AS ua_kind,
+    s.srr_response_type AS srr_response_type,
+    s.srr_rule_name AS srr_rule_name,
+    -- The CAST is load-bearing: IN over a LowCardinality column yields
+    -- LowCardinality(UInt8), which a view is not allowed to hold.
+    CAST(s.srr_response_type IN ('BLOCK', 'STATUS_CODE_404', 'STATUS_CODE_451', 'SOCKET_DROP') AS UInt8) AS is_blocked
 FROM {db}.sub_requests AS s
 LEFT JOIN {db}.v_users AS du ON du.user_id = s.user_id;
 
@@ -92,6 +97,7 @@ LEFT JOIN {db}.v_users AS du ON du.user_id = s.user_id;
 --   distinct User-Agents fetching the subscription beyond 2   2 points each
 --   subscription fetches beyond 20                            0.2 points each
 --   scripted subscription fetches (curl/python/bots)          0.5 points each
+--   fetches refused by a response rule, beyond the first 5    0.5 points each
 
 CREATE OR REPLACE VIEW {db}.v_user_abuse AS
 WITH
@@ -133,6 +139,7 @@ WITH
             user_id,
             sum(requests) AS sub_requests,
             sum(scripted) AS sub_scripted,
+            sum(blocked) AS sub_blocked,
             uniqMerge(ips) AS sub_ips,
             uniqMerge(uas) AS sub_uas
         FROM {db}.sub_req_5m
@@ -156,6 +163,7 @@ SELECT
     c.hosting_ips AS hosting_ips,
     s.sub_requests AS sub_requests,
     s.sub_scripted AS sub_scripted,
+    s.sub_blocked AS sub_blocked,
     s.sub_ips AS sub_ips,
     s.sub_uas AS sub_uas,
     round(
@@ -167,6 +175,7 @@ SELECT
         + greatest(toInt64(s.sub_uas) - 2, 0) * 2
         + greatest(toInt64(s.sub_requests) - 20, 0) * 0.2
         + s.sub_scripted * 0.5
+        + greatest(toInt64(s.sub_blocked) - 5, 0) * 0.5
     , 1) AS score
 FROM everyone AS e
 LEFT JOIN traffic AS t ON t.user_id = e.user_id

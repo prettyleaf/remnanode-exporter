@@ -45,6 +45,7 @@ func (SubRequestDecoder) Columns() []string {
 	return []string{
 		"ts", "user_id", "ip", "ip_prefix", "country", "city",
 		"asn", "as_org", "is_hosting", "user_agent", "ua_family", "ua_kind",
+		"srr_response_type", "srr_rule_name",
 	}
 }
 
@@ -68,6 +69,8 @@ func (d SubRequestDecoder) Decode(f model.Fields) ([][]any, error) {
 		msg.UserAgent,
 		client.Family,
 		string(client.Kind),
+		msg.ResponseType,
+		msg.RuleName,
 	}}, nil
 }
 
