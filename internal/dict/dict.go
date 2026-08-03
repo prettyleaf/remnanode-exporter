@@ -4,11 +4,16 @@
 // Both dimensions come from the public API: /api/users/stream and /api/nodes
 // expose the same numeric ids the export streams carry. The node id was added
 // in Remnawave 3.1.0; against an older panel the nodes stay unnamed.
+//
+// The same client also runs a one-shot preflight against
+// /api/system/configuration, which arrived in Remnawave 3.2.0, to report how
+// the panel is configured to export.
 package dict
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -52,6 +57,7 @@ func New(opt Options, w *sink.Writer, log *slog.Logger) *Syncer {
 
 // Run syncs immediately and then every Interval until ctx is cancelled.
 func (s *Syncer) Run(ctx context.Context) error {
+	s.checkConfiguration(ctx)
 	s.syncAll(ctx)
 
 	t := time.NewTicker(s.opt.Interval)
@@ -78,6 +84,66 @@ func (s *Syncer) syncAll(ctx context.Context) {
 		metrics.DictErrors.WithLabelValues(TableNodes).Inc()
 		s.log.Warn("node dictionary refresh failed", "err", err)
 	}
+}
+
+// configurationResponse is the part of /api/system/configuration that decides
+// whether this exporter sees anything at all.
+type configurationResponse struct {
+	Response struct {
+		Service struct {
+			DisableUserUsageRecords bool `json:"disableUserUsageRecords"`
+			DisableSrhRecords       bool `json:"disableSrhRecords"`
+			ExportToRedisStream     bool `json:"exportToRedisStream"`
+		} `json:"service"`
+		Misc struct {
+			UserUsageIgnoreBelowBytes float64 `json:"userUsageIgnoreBelowBytes"`
+		} `json:"misc"`
+	} `json:"response"`
+}
+
+// checkConfiguration reports once, at startup, how the panel is configured to
+// export. Everything here is advisory and never blocks startup: the endpoint
+// only exists on Remnawave 3.2.0 and newer, and only for tokens carrying the
+// system:configuration:read scope, so both of those are ordinary setups rather
+// than faults.
+func (s *Syncer) checkConfiguration(ctx context.Context) {
+	if s.opt.APIURL == "" || s.opt.APIToken == "" {
+		return // no panel credentials: nothing to ask
+	}
+
+	var decoded configurationResponse
+	if err := s.getJSON(ctx, "/api/system/configuration", &decoded); err != nil {
+		code := 0
+		var se *statusError
+		if errors.As(err, &se) {
+			code = se.Code
+		}
+		switch code {
+		case http.StatusNotFound, http.StatusMethodNotAllowed:
+			s.log.Debug("panel has no /api/system/configuration, it needs Remnawave 3.2.0 or newer")
+		case http.StatusUnauthorized, http.StatusForbidden:
+			s.log.Debug("configuration preflight skipped: the token lacks the system:configuration:read scope")
+		default:
+			s.log.Debug("configuration preflight failed", "err", err)
+		}
+		return
+	}
+
+	svc := decoded.Response.Service
+	if !svc.ExportToRedisStream {
+		s.log.Warn("panel is not publishing the export streams, so no data will ever arrive: " +
+			"set EXPORT_TO_STREAM_ENABLED=true in the panel environment and restart it")
+		return
+	}
+
+	// Neither disable* flag stops the streams; they only skip the panel's own
+	// bookkeeping tables. userUsageIgnoreBelowBytes is the one that drops
+	// traffic upstream of the stream, so it is what explains small deltas that
+	// never reach ClickHouse.
+	s.log.Info("panel export configuration",
+		"user_usage_ignore_below_bytes", uint64(max(decoded.Response.Misc.UserUsageIgnoreBelowBytes, 0)),
+		"user_usage_records_disabled", svc.DisableUserUsageRecords,
+		"srh_records_disabled", svc.DisableSrhRecords)
 }
 
 type streamUser struct {
@@ -163,6 +229,16 @@ func (s *Syncer) fetchUsersPage(ctx context.Context, cursor string) ([]streamUse
 	return decoded.Response.Users, next, nil
 }
 
+// statusError is a non-200 answer from the panel. It carries the code so
+// callers can tell "this panel is too old" apart from a real failure.
+type statusError struct {
+	URL    string
+	Status string
+	Code   int
+}
+
+func (e *statusError) Error() string { return fmt.Sprintf("GET %s: %s", e.URL, e.Status) }
+
 // getJSON performs an authenticated GET against the panel API and decodes the
 // body into out.
 func (s *Syncer) getJSON(ctx context.Context, path string, out any) error {
@@ -180,7 +256,7 @@ func (s *Syncer) getJSON(ctx context.Context, path string, out any) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GET %s: %s", url, resp.Status)
+		return &statusError{URL: url, Status: resp.Status, Code: resp.StatusCode}
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }

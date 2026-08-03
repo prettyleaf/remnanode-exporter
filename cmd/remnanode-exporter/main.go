@@ -1,5 +1,6 @@
-// Command remnanode-exporter ships the Remnawave 3.1 Redis export streams into
+// Command remnanode-exporter ships the Remnawave Redis export streams into
 // ClickHouse and enriches every address with MaxMind GeoLite2 data.
+// Verified against panel 3.1.x and 3.2.0.
 package main
 
 import (

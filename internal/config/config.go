@@ -36,7 +36,8 @@ type Config struct {
 	GeoIPReload   time.Duration
 
 	// Remnawave panel API, used to resolve the numeric user and node ids the
-	// streams carry into names. Node ids need a panel on 3.1.0 or newer.
+	// streams carry into names, and to report the panel's export settings at
+	// startup. Node ids need a panel on 3.1.0 or newer.
 	APIURL      string
 	APIToken    string
 	DictRefresh time.Duration
