@@ -172,3 +172,150 @@ func TestStatusErrorMessage(t *testing.T) {
 		t.Errorf("Error() = %q, want %q", got, want)
 	}
 }
+
+func TestParsePanelVersion(t *testing.T) {
+	for raw, want := range map[string]panelVersion{
+		"3.3.2":     {3, 3, 2},
+		"v3.1.0":    {3, 1, 0},
+		" 3.2.0 ":   {3, 2, 0},
+		"3.4.0-dev": {3, 4, 0},
+		"10.0.11":   {10, 0, 11},
+		// Tolerated on purpose: a floor check only ever needs the first three
+		// numbers, whatever a build appends after them.
+		"3.3.2.1": {3, 3, 2},
+	} {
+		got, ok := parsePanelVersion(raw)
+		if !ok || got != want {
+			t.Errorf("parsePanelVersion(%q) = %v, %v; want %v, true", raw, got, ok, want)
+		}
+	}
+	for _, raw := range []string{"", "3.3", "next", "3.x.2", "3.3.x"} {
+		if got, ok := parsePanelVersion(raw); ok {
+			t.Errorf("parsePanelVersion(%q) = %v, true; want false", raw, got)
+		}
+	}
+}
+
+func TestPanelVersionOrdering(t *testing.T) {
+	if !(panelVersion{3, 0, 9}).less(minPanelVersion) {
+		t.Error("3.0.9 must sort below the 3.1.0 floor")
+	}
+	if (panelVersion{3, 1, 0}).less(minPanelVersion) {
+		t.Error("3.1.0 is the floor itself, not below it")
+	}
+	if (panelVersion{3, 3, 2}).less(minPanelVersion) {
+		t.Error("3.3.2 must sort above the 3.1.0 floor")
+	}
+}
+
+func TestCheckVersionReportsPanelVersion(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_, _ = w.Write([]byte(`{"response":{"version":"3.3.2",` +
+			`"build":{"time":"2026-08-20T03:00:00Z","number":"1"},` +
+			`"git":{"backend":{"commitSha":"abc","branch":"main","commitUrl":"u"},` +
+			`"frontend":{"commitSha":"def","commitUrl":"u"}}}}`))
+	}))
+	defer srv.Close()
+
+	s, buf := newTestSyncer(srv.URL)
+	s.checkVersion(context.Background())
+
+	if gotPath != "/api/system/metadata" {
+		t.Errorf("requested %q, want /api/system/metadata", gotPath)
+	}
+	recs := logged(t, buf)
+	if len(recs) != 1 {
+		t.Fatalf("got %d log records, want 1: %v", len(recs), recs)
+	}
+	if recs[0]["level"] != "INFO" {
+		t.Errorf("level = %v, want INFO", recs[0]["level"])
+	}
+	if recs[0]["panel_version"] != "3.3.2" {
+		t.Errorf("panel_version = %v, want 3.3.2", recs[0]["panel_version"])
+	}
+}
+
+// A panel below 3.1.0 still runs, it just cannot name nodes or carry the SRR
+// fields, so the exporter has to say so out loud once.
+func TestCheckVersionWarnsOnOldPanel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"response":{"version":"3.0.5"}}`))
+	}))
+	defer srv.Close()
+
+	s, buf := newTestSyncer(srv.URL)
+	s.checkVersion(context.Background())
+
+	recs := logged(t, buf)
+	if len(recs) != 1 {
+		t.Fatalf("got %d log records, want 1: %v", len(recs), recs)
+	}
+	if recs[0]["level"] != "WARN" {
+		t.Errorf("level = %v, want WARN", recs[0]["level"])
+	}
+	if recs[0]["panel_version"] != "3.0.5" {
+		t.Errorf("panel_version = %v, want 3.0.5", recs[0]["panel_version"])
+	}
+}
+
+// Same rule as the configuration preflight: an endpoint the panel does not
+// have, a token without the scope and an unreadable version are all ordinary,
+// and none of them may be louder than a debug line.
+func TestCheckVersionStaysQuietOnErrors(t *testing.T) {
+	for name, tc := range map[string]struct {
+		code int
+		body string
+	}{
+		"endpoint missing": {http.StatusNotFound, ""},
+		"token unscoped":   {http.StatusForbidden, ""},
+		"panel broken":     {http.StatusInternalServerError, ""},
+		"garbage body":     {http.StatusOK, "not json"},
+		"version unusable": {http.StatusOK, `{"response":{"version":"next"}}`},
+		"version missing":  {http.StatusOK, `{"response":{}}`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.code)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			s, buf := newTestSyncer(srv.URL)
+			s.checkVersion(context.Background())
+
+			for _, rec := range logged(t, buf) {
+				if rec["level"] != "DEBUG" {
+					t.Errorf("level = %v, want DEBUG (msg %v)", rec["level"], rec["msg"])
+				}
+			}
+		})
+	}
+}
+
+func TestCheckVersionSkippedWithoutCredentials(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		called = true
+	}))
+	defer srv.Close()
+
+	for name, opt := range map[string]Options{
+		"no token": {APIURL: srv.URL},
+		"no url":   {APIToken: "token"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			buf := &bytes.Buffer{}
+			log := slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			New(opt, nil, log).checkVersion(context.Background())
+
+			if called {
+				t.Error("panel was called without credentials configured")
+			}
+			if buf.Len() != 0 {
+				t.Errorf("logged %q, want silence", buf.String())
+			}
+		})
+	}
+}

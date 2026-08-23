@@ -89,17 +89,19 @@ volumes:
   clickhouse-data:
   clickhouse-logs:
   geoip:
-  # Created by the Remnawave stack. Check the exact name with:
+  # Created by the Remnawave stack, which names it explicitly, so it is not
+  # prefixed with the panel's compose project name. Override only if your
+  # install renamed it:
   #   docker volume ls | grep valkey
   valkey-socket:
     external: true
-    name: ${VALKEY_SOCKET_VOLUME:-remnawave_valkey-socket}
+    name: ${VALKEY_SOCKET_VOLUME:-valkey-socket}
 
 networks:
   internal:
     driver: bridge
-  # Created by the Remnawave stack. Check the exact name with:
-  #   docker network ls
+  # Created by the Remnawave stack, also under an explicit name. Check with:
+  #   docker network ls | grep remnawave
   remnawave:
     external: true
     name: ${REMNAWAVE_NETWORK:-remnawave-network}

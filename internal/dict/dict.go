@@ -5,9 +5,10 @@
 // expose the same numeric ids the export streams carry. The node id was added
 // in Remnawave 3.1.0; against an older panel the nodes stay unnamed.
 //
-// The same client also runs a one-shot preflight against
-// /api/system/configuration, which arrived in Remnawave 3.2.0, to report how
-// the panel is configured to export.
+// The same client also runs two one-shot preflights at startup:
+// /api/system/metadata (Remnawave 3.0.0 and newer) reports which panel version
+// is on the other end, and /api/system/configuration (3.2.0 and newer) reports
+// how that panel is configured to export.
 package dict
 
 import (
@@ -17,6 +18,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -57,6 +59,7 @@ func New(opt Options, w *sink.Writer, log *slog.Logger) *Syncer {
 
 // Run syncs immediately and then every Interval until ctx is cancelled.
 func (s *Syncer) Run(ctx context.Context) error {
+	s.checkVersion(ctx)
 	s.checkConfiguration(ctx)
 	s.syncAll(ctx)
 
@@ -86,6 +89,115 @@ func (s *Syncer) syncAll(ctx context.Context) {
 	}
 }
 
+// minPanelVersion is the oldest panel this exporter fully understands: 3.1.0
+// is where /api/nodes started returning the numeric node id, and where the
+// response-rule fields appeared in the subscription_requests stream.
+var minPanelVersion = panelVersion{3, 1, 0}
+
+// panelVersion is a major.minor.patch triple, which is all that is needed to
+// tell two Remnawave releases apart.
+type panelVersion struct{ major, minor, patch int }
+
+func (v panelVersion) less(o panelVersion) bool {
+	switch {
+	case v.major != o.major:
+		return v.major < o.major
+	case v.minor != o.minor:
+		return v.minor < o.minor
+	default:
+		return v.patch < o.patch
+	}
+}
+
+// parsePanelVersion reads "3.3.2". Anything the panel appends to the patch
+// number (a "-dev" tag on an unreleased build) is cut off rather than
+// rejected: the three numbers are the whole comparison.
+func parsePanelVersion(s string) (panelVersion, bool) {
+	parts := strings.SplitN(strings.TrimPrefix(strings.TrimSpace(s), "v"), ".", 3)
+	if len(parts) != 3 {
+		return panelVersion{}, false
+	}
+	var out [3]int
+	for i, part := range parts {
+		n, ok := leadingInt(part)
+		if !ok {
+			return panelVersion{}, false
+		}
+		out[i] = n
+	}
+	return panelVersion{out[0], out[1], out[2]}, true
+}
+
+// leadingInt reads the digits that start s, ignoring whatever follows them.
+func leadingInt(s string) (int, bool) {
+	end := 0
+	for end < len(s) && s[end] >= '0' && s[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s[:end])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// metadataResponse is the part of /api/system/metadata the exporter reads.
+type metadataResponse struct {
+	Response struct {
+		Version string `json:"version"`
+	} `json:"response"`
+}
+
+// checkVersion reports which panel the exporter is talking to and warns when
+// that panel predates the data this exporter is built on. Like the
+// configuration preflight it is advisory and never blocks startup.
+func (s *Syncer) checkVersion(ctx context.Context) {
+	if s.opt.APIURL == "" || s.opt.APIToken == "" {
+		return // no panel credentials: nothing to ask
+	}
+
+	var decoded metadataResponse
+	if err := s.getJSON(ctx, "/api/system/metadata", &decoded); err != nil {
+		s.logPreflightSkip("/api/system/metadata", "3.0.0", "system:metadata", err)
+		return
+	}
+
+	raw := decoded.Response.Version
+	v, ok := parsePanelVersion(raw)
+	if !ok {
+		s.log.Debug("panel reported an unreadable version", "version", raw)
+		return
+	}
+	if v.less(minPanelVersion) {
+		s.log.Warn("panel is older than 3.1.0: nodes stay unnamed and subscription "+
+			"requests carry no response-rule fields", "panel_version", raw)
+		return
+	}
+	s.log.Info("panel version", "panel_version", raw)
+}
+
+// logPreflightSkip explains at DEBUG why an advisory preflight got no answer.
+// None of these are faults: the endpoint may postdate the panel, or the token
+// may simply not carry the scope that endpoint sits behind.
+func (s *Syncer) logPreflightSkip(path, since, scope string, err error) {
+	code := 0
+	var se *statusError
+	if errors.As(err, &se) {
+		code = se.Code
+	}
+	switch code {
+	case http.StatusNotFound, http.StatusMethodNotAllowed:
+		s.log.Debug("panel has no " + path + ", it needs Remnawave " + since + " or newer")
+	case http.StatusUnauthorized, http.StatusForbidden:
+		s.log.Debug("preflight skipped: the token lacks the "+scope+" scope", "endpoint", path)
+	default:
+		s.log.Debug("preflight failed", "endpoint", path, "err", err)
+	}
+}
+
 // configurationResponse is the part of /api/system/configuration that decides
 // whether this exporter sees anything at all.
 type configurationResponse struct {
@@ -104,8 +216,8 @@ type configurationResponse struct {
 // checkConfiguration reports once, at startup, how the panel is configured to
 // export. Everything here is advisory and never blocks startup: the endpoint
 // only exists on Remnawave 3.2.0 and newer, and only for tokens carrying the
-// system:configuration:read scope, so both of those are ordinary setups rather
-// than faults.
+// system:configuration scope, so both of those are ordinary setups rather than
+// faults.
 func (s *Syncer) checkConfiguration(ctx context.Context) {
 	if s.opt.APIURL == "" || s.opt.APIToken == "" {
 		return // no panel credentials: nothing to ask
@@ -113,19 +225,7 @@ func (s *Syncer) checkConfiguration(ctx context.Context) {
 
 	var decoded configurationResponse
 	if err := s.getJSON(ctx, "/api/system/configuration", &decoded); err != nil {
-		code := 0
-		var se *statusError
-		if errors.As(err, &se) {
-			code = se.Code
-		}
-		switch code {
-		case http.StatusNotFound, http.StatusMethodNotAllowed:
-			s.log.Debug("panel has no /api/system/configuration, it needs Remnawave 3.2.0 or newer")
-		case http.StatusUnauthorized, http.StatusForbidden:
-			s.log.Debug("configuration preflight skipped: the token lacks the system:configuration:read scope")
-		default:
-			s.log.Debug("configuration preflight failed", "err", err)
-		}
+		s.logPreflightSkip("/api/system/configuration", "3.2.0", "system:configuration", err)
 		return
 	}
 
