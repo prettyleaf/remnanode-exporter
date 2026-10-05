@@ -133,6 +133,19 @@ CLICKHOUSE_BIND=100.x.x.x     # Grafana на другом сервере, чер
    [`dashboards/`](dashboards). Датасорс в них переменная, Grafana подставит
    ClickHouse сама.
 
+`dial tcp 127.0.0.1:9000: connect: connection refused` при сохранении
+датасорса — значит Grafana крутится в docker, а `127.0.0.1` внутри её контейнера —
+это loopback самого контейнера, а не хоста. Лечится так: `CLICKHOUSE_BIND=172.17.0.1`
+в `.env`, `docker compose up -d` (адрес порта меняется только при пересоздании
+контейнера) и тот же `172.17.0.1` в Host датасорса. Проверить, что порт виден из
+контейнера Grafana (имя — из `docker ps`):
+
+```bash
+docker exec grafana wget -T3 -O- http://172.17.0.1:9000
+# HTTP/1.0 400 Bad Request — достучались: это ClickHouse отказывается говорить HTTP на 9000
+# Connection refused       — на этом адресе порт не опубликован
+```
+
 Метрики самого экспортера (необязательно) — `/metrics` на `127.0.0.1:9102`.
 Готовый scrape-конфиг: [`deploy/vmagent/remnanode-exporter.yml`](deploy/vmagent/remnanode-exporter.yml).
 Порт именно 9102, потому что 9101 обычно занят cAdvisor'ом.
