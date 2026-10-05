@@ -48,7 +48,7 @@
         "refresh": 2,
         "multi": true,
         "includeAll": true,
-        "allValue": null,
+        "allValue": "node_name",
         "current": {
           "selected": true,
           "text": [
@@ -92,7 +92,7 @@
           "editorType": "sql",
           "format": 1,
           "pluginVersion": "4.5.1",
-          "rawSql": "SELECT sum(bytes) AS bytes\nFROM remnawave.v_usage\nWHERE $__timeFilter(ts5) AND node_name IN (${node:sqlstring})"
+          "rawSql": "SELECT sum(bytes) AS bytes\nFROM remnawave.v_usage\nWHERE $__timeFilter(ts5) AND has([${node:sqlstring}], node_name)"
         }
       ],
       "fieldConfig": {
@@ -155,7 +155,7 @@
           "editorType": "sql",
           "format": 1,
           "pluginVersion": "4.5.1",
-          "rawSql": "SELECT uniqExact(user_id) AS users\nFROM remnawave.v_usage\nWHERE $__timeFilter(ts5) AND node_name IN (${node:sqlstring})"
+          "rawSql": "SELECT uniqExact(user_id) AS users\nFROM remnawave.v_usage\nWHERE $__timeFilter(ts5) AND has([${node:sqlstring}], node_name)"
         }
       ],
       "fieldConfig": {
@@ -218,7 +218,7 @@
           "editorType": "sql",
           "format": 1,
           "pluginVersion": "4.5.1",
-          "rawSql": "SELECT max(bps) AS peak_bps\nFROM\n(\n    SELECT ts5, node_name, sum(bytes) * 8 / 300 AS bps\n    FROM remnawave.v_usage\n    WHERE $__timeFilter(ts5) AND node_name IN (${node:sqlstring})\n    GROUP BY ts5, node_name\n)"
+          "rawSql": "SELECT max(bps) AS peak_bps\nFROM\n(\n    SELECT ts5, node_name, sum(bytes) * 8 / 300 AS bps\n    FROM remnawave.v_usage\n    WHERE $__timeFilter(ts5) AND has([${node:sqlstring}], node_name)\n    GROUP BY ts5, node_name\n)"
         }
       ],
       "fieldConfig": {
@@ -281,7 +281,7 @@
           "editorType": "sql",
           "format": 1,
           "pluginVersion": "4.5.1",
-          "rawSql": "SELECT round(100 * max(b) / nullIf(sum(b), 0), 1) AS pct\nFROM\n(\n    SELECT user_id, sum(bytes) AS b\n    FROM remnawave.v_usage\n    WHERE $__timeFilter(ts5) AND node_name IN (${node:sqlstring})\n    GROUP BY user_id\n)"
+          "rawSql": "SELECT round(100 * max(b) / nullIf(sum(b), 0), 1) AS pct\nFROM\n(\n    SELECT user_id, sum(bytes) AS b\n    FROM remnawave.v_usage\n    WHERE $__timeFilter(ts5) AND has([${node:sqlstring}], node_name)\n    GROUP BY user_id\n)"
         }
       ],
       "fieldConfig": {
@@ -352,7 +352,7 @@
           "editorType": "sql",
           "format": 1,
           "pluginVersion": "4.5.1",
-          "rawSql": "SELECT uniqExact(node_id) AS nodes\nFROM remnawave.v_usage\nWHERE $__timeFilter(ts5) AND node_name IN (${node:sqlstring})"
+          "rawSql": "SELECT uniqExact(node_id) AS nodes\nFROM remnawave.v_usage\nWHERE $__timeFilter(ts5) AND has([${node:sqlstring}], node_name)"
         }
       ],
       "fieldConfig": {
@@ -415,7 +415,7 @@
           "editorType": "sql",
           "format": 1,
           "pluginVersion": "4.5.1",
-          "rawSql": "SELECT quantileExact(0.95)(b) AS p95\nFROM\n(\n    SELECT user_id, sum(bytes) AS b\n    FROM remnawave.v_usage\n    WHERE $__timeFilter(ts5) AND node_name IN (${node:sqlstring})\n    GROUP BY user_id\n)"
+          "rawSql": "SELECT quantileExact(0.95)(b) AS p95\nFROM\n(\n    SELECT user_id, sum(bytes) AS b\n    FROM remnawave.v_usage\n    WHERE $__timeFilter(ts5) AND has([${node:sqlstring}], node_name)\n    GROUP BY user_id\n)"
         }
       ],
       "fieldConfig": {
@@ -478,7 +478,7 @@
           "editorType": "sql",
           "format": 0,
           "pluginVersion": "4.5.1",
-          "rawSql": "SELECT\n    $__timeInterval(ts5) AS time,\n    node_name,\n    sum(bytes) * 8 / $__interval_s AS bps\nFROM remnawave.v_usage\nWHERE $__timeFilter(ts5) AND node_name IN (${node:sqlstring})\nGROUP BY time, node_name\nORDER BY time"
+          "rawSql": "SELECT\n    $__timeInterval(ts5) AS time,\n    node_name,\n    sum(bytes) * 8 / $__interval_s AS bps\nFROM remnawave.v_usage\nWHERE $__timeFilter(ts5) AND has([${node:sqlstring}], node_name)\nGROUP BY time, node_name\nORDER BY time"
         }
       ],
       "fieldConfig": {
@@ -558,7 +558,7 @@
           "editorType": "sql",
           "format": 0,
           "pluginVersion": "4.5.1",
-          "rawSql": "SELECT\n    $__timeInterval(ts5) AS time,\n    username,\n    sum(bytes) * 8 / $__interval_s AS bps\nFROM remnawave.v_usage\nWHERE $__timeFilter(ts5) AND node_name IN (${node:sqlstring})\n  AND user_id IN\n  (\n      SELECT user_id\n      FROM remnawave.v_usage\n      WHERE $__timeFilter(ts5) AND node_name IN (${node:sqlstring})\n      GROUP BY user_id\n      ORDER BY sum(bytes) DESC\n      LIMIT 10\n  )\nGROUP BY time, username\nORDER BY time"
+          "rawSql": "SELECT\n    $__timeInterval(ts5) AS time,\n    username,\n    sum(bytes) * 8 / $__interval_s AS bps\nFROM remnawave.v_usage\nWHERE $__timeFilter(ts5) AND has([${node:sqlstring}], node_name)\n  AND user_id IN\n  (\n      SELECT user_id\n      FROM remnawave.v_usage\n      WHERE $__timeFilter(ts5) AND has([${node:sqlstring}], node_name)\n      GROUP BY user_id\n      ORDER BY sum(bytes) DESC\n      LIMIT 10\n  )\nGROUP BY time, username\nORDER BY time"
         }
       ],
       "fieldConfig": {
@@ -638,7 +638,7 @@
           "editorType": "sql",
           "format": 1,
           "pluginVersion": "4.5.1",
-          "rawSql": "SELECT\n    username,\n    any(status) AS status,\n    any(tag) AS tag,\n    sum(bytes) AS total_bytes,\n    round(max(bytes) * 8 / 300 / 1000000, 2) AS peak_mbps,\n    max(nodes) AS nodes,\n    round(100 * sum(bytes) / nullIf((\n        SELECT sum(bytes) FROM remnawave.v_usage WHERE $__timeFilter(ts5) AND node_name IN (${node:sqlstring})\n    ), 0), 2) AS pct_of_total\nFROM\n(\n    SELECT\n        ts5,\n        username,\n        any(status) AS status,\n        any(tag) AS tag,\n        sum(bytes) AS bytes,\n        uniqExact(node_name) AS nodes\n    FROM remnawave.v_usage\n    WHERE $__timeFilter(ts5) AND node_name IN (${node:sqlstring})\n    GROUP BY ts5, username\n)\nGROUP BY username\nORDER BY total_bytes DESC\nLIMIT 100"
+          "rawSql": "SELECT\n    username,\n    any(status) AS status,\n    any(tag) AS tag,\n    sum(bytes) AS total_bytes,\n    round(max(bytes) * 8 / 300 / 1000000, 2) AS peak_mbps,\n    max(nodes) AS nodes,\n    round(100 * sum(bytes) / nullIf((\n        SELECT sum(bytes) FROM remnawave.v_usage WHERE $__timeFilter(ts5) AND has([${node:sqlstring}], node_name)\n    ), 0), 2) AS pct_of_total\nFROM\n(\n    SELECT\n        ts5,\n        username,\n        any(status) AS status,\n        any(tag) AS tag,\n        sum(bytes) AS bytes,\n        uniqExact(node_name) AS nodes\n    FROM remnawave.v_usage\n    WHERE $__timeFilter(ts5) AND has([${node:sqlstring}], node_name)\n    GROUP BY ts5, username\n)\nGROUP BY username\nORDER BY total_bytes DESC\nLIMIT 100"
         }
       ],
       "fieldConfig": {
@@ -806,7 +806,7 @@
           "editorType": "sql",
           "format": 1,
           "pluginVersion": "4.5.1",
-          "rawSql": "SELECT node_name, sum(bytes) AS bytes\nFROM remnawave.v_usage\nWHERE $__timeFilter(ts5) AND node_name IN (${node:sqlstring})\nGROUP BY node_name\nORDER BY bytes DESC"
+          "rawSql": "SELECT node_name, sum(bytes) AS bytes\nFROM remnawave.v_usage\nWHERE $__timeFilter(ts5) AND has([${node:sqlstring}], node_name)\nGROUP BY node_name\nORDER BY bytes DESC"
         }
       ],
       "fieldConfig": {
@@ -876,7 +876,7 @@
           "editorType": "sql",
           "format": 1,
           "pluginVersion": "4.5.1",
-          "rawSql": "SELECT\n    node_name,\n    username,\n    bytes,\n    round(100 * bytes / nullIf(sum(bytes) OVER (PARTITION BY node_name), 0), 1) AS pct_of_node\nFROM\n(\n    SELECT node_name, username, sum(bytes) AS bytes\n    FROM remnawave.v_usage\n    WHERE $__timeFilter(ts5) AND node_name IN (${node:sqlstring})\n    GROUP BY node_name, username\n)\nORDER BY node_name ASC, bytes DESC\nLIMIT 5 BY node_name"
+          "rawSql": "SELECT\n    node_name,\n    username,\n    bytes,\n    round(100 * bytes / nullIf(sum(bytes) OVER (PARTITION BY node_name), 0), 1) AS pct_of_node\nFROM\n(\n    SELECT node_name, username, sum(bytes) AS bytes\n    FROM remnawave.v_usage\n    WHERE $__timeFilter(ts5) AND has([${node:sqlstring}], node_name)\n    GROUP BY node_name, username\n)\nORDER BY node_name ASC, bytes DESC\nLIMIT 5 BY node_name"
         }
       ],
       "fieldConfig": {

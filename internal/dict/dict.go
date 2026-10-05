@@ -249,6 +249,15 @@ func (s *Syncer) getJSON(ctx context.Context, path string, out any) error {
 	}
 	req.Header.Set("Authorization", "Bearer "+s.opt.APIToken)
 	req.Header.Set("Accept", "application/json")
+	// Outside development mode the panel destroys the socket of any request
+	// that did not come through a TLS-terminating reverse proxy, which reaches
+	// a direct http://remnawave:3000 caller as a bare EOF. Over plain HTTP we
+	// are talking to the panel's own port, so stand in for that proxy; over
+	// HTTPS a real one is in front and sets these itself.
+	if req.URL.Scheme == "http" {
+		req.Header.Set("X-Forwarded-For", "127.0.0.1")
+		req.Header.Set("X-Forwarded-Proto", "https")
+	}
 
 	resp, err := s.http.Do(req)
 	if err != nil {

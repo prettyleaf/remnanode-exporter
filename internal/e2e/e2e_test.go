@@ -257,7 +257,8 @@ func TestDashboardQueries(t *testing.T) {
 			} `json:"panels"`
 			Templating struct {
 				List []struct {
-					Name string `json:"name"`
+					Name     string `json:"name"`
+					AllValue string `json:"allValue"`
 					// Query is an object for SQL-backed variables and a plain
 					// string for the datasource picker, hence the deferred decode.
 					Query json.RawMessage `json:"query"`
@@ -268,6 +269,17 @@ func TestDashboardQueries(t *testing.T) {
 			t.Fatalf("%s: %v", file, err)
 		}
 
+		// Every query runs once per way Grafana can expand $node: a picked
+		// list, the custom All value (inserted verbatim, unescaped), and an
+		// empty list, which is what All becomes on an empty database when no
+		// custom All value is set.
+		nodeValues := []string{"'node-1', 'node-2'", ""}
+		for _, v := range dash.Templating.List {
+			if v.Name == "node" && v.AllValue != "" {
+				nodeValues = append(nodeValues, v.AllValue)
+			}
+		}
+
 		for _, v := range dash.Templating.List {
 			var q struct {
 				RawSQL string `json:"rawSql"`
@@ -276,7 +288,7 @@ func TestDashboardQueries(t *testing.T) {
 				continue
 			}
 			total++
-			runQuery(ctx, t, w, dash.Title+" / $"+v.Name, q.RawSQL)
+			runQuery(ctx, t, w, dash.Title+" / $"+v.Name, q.RawSQL, nodeValues)
 		}
 		for _, p := range dash.Panels {
 			for _, tg := range p.Targets {
@@ -284,26 +296,32 @@ func TestDashboardQueries(t *testing.T) {
 					continue
 				}
 				total++
-				runQuery(ctx, t, w, dash.Title+" / "+p.Title, tg.RawSQL)
+				runQuery(ctx, t, w, dash.Title+" / "+p.Title, tg.RawSQL, nodeValues)
 			}
 		}
 	}
 	t.Logf("executed %d dashboard queries", total)
 }
 
-func runQuery(ctx context.Context, t *testing.T, w *sink.Writer, name, rawSQL string) {
+func runQuery(ctx context.Context, t *testing.T, w *sink.Writer, name, rawSQL string, nodeValues []string) {
 	t.Helper()
-	query := expandMacros(rawSQL)
-	rows, err := w.Conn().Query(ctx, query)
-	if err != nil {
-		t.Errorf("%s: %v\n--- query ---\n%s", name, err, query)
-		return
+	if !strings.Contains(rawSQL, "${node:sqlstring}") {
+		nodeValues = nodeValues[:1]
 	}
-	defer rows.Close()
-	for rows.Next() {
-	}
-	if err := rows.Err(); err != nil {
-		t.Errorf("%s: %v\n--- query ---\n%s", name, err, query)
+	for _, node := range nodeValues {
+		query := expandMacros(rawSQL, node)
+		rows, err := w.Conn().Query(ctx, query)
+		if err != nil {
+			t.Errorf("%s ($node = %q): %v\n--- query ---\n%s", name, node, err, query)
+			continue
+		}
+		for rows.Next() {
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			t.Errorf("%s ($node = %q): %v\n--- query ---\n%s", name, node, err, query)
+		}
 	}
 }
 
@@ -313,8 +331,9 @@ var (
 )
 
 // expandMacros substitutes the Grafana ClickHouse datasource macros the same
-// way the plugin does, so the queries can run outside Grafana.
-func expandMacros(q string) string {
+// way the plugin does, so the queries can run outside Grafana. node is what
+// ${node:sqlstring} expands to.
+func expandMacros(q, node string) string {
 	const from = "toDateTime(now() - 86400)"
 	const to = "toDateTime(now() + 600)"
 
@@ -324,8 +343,7 @@ func expandMacros(q string) string {
 	q = strings.ReplaceAll(q, "$__interval_s", "300")
 	q = strings.ReplaceAll(q, "$__fromTime", from)
 	q = strings.ReplaceAll(q, "$__toTime", to)
-	// Grafana expands a multi-value variable to a comma separated list.
-	q = strings.ReplaceAll(q, "${node:sqlstring}", "'node-1', 'node-2'")
+	q = strings.ReplaceAll(q, "${node:sqlstring}", node)
 	return q
 }
 
