@@ -44,6 +44,30 @@ func logged(t *testing.T, buf *bytes.Buffer) []map[string]any {
 	return out
 }
 
+// TestDirectPanelRequestsPassProxyCheck mimics the panel's proxyCheckMiddleware,
+// which drops the connection without a response unless the request carries
+// X-Forwarded-For and X-Forwarded-Proto: https.
+func TestDirectPanelRequestsPassProxyCheck(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Forwarded-For") == "" || r.Header.Get("X-Forwarded-Proto") != "https" {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"response":[]}`))
+	}))
+	defer srv.Close()
+
+	s, _ := newTestSyncer(srv.URL)
+	var decoded nodesResponse
+	if err := s.getJSON(context.Background(), "/api/nodes", &decoded); err != nil {
+		t.Fatalf("direct request to the panel was dropped: %v", err)
+	}
+}
+
 func TestCheckConfigurationReportsPanelSettings(t *testing.T) {
 	var gotPath, gotAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
