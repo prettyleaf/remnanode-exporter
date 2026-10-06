@@ -25,6 +25,8 @@ GROUP BY ts5, node_id, user_id;
 -- Connection fan-out per user: how many addresses, networks, ASNs, countries
 -- and nodes a single account was seen on inside one 5-minute bucket.
 -- uniqState is used so buckets can be merged across arbitrary time ranges.
+-- An address of one of the panel's own nodes is counted as infra_ips and never
+-- as a hosting address: a chained node sits in a datacenter by design.
 
 CREATE TABLE IF NOT EXISTS {db}.user_conn_5m
 (
@@ -35,12 +37,19 @@ CREATE TABLE IF NOT EXISTS {db}.user_conn_5m
     asns        AggregateFunction(uniq, UInt32),
     countries   AggregateFunction(uniq, String),
     nodes       AggregateFunction(uniq, UInt64),
-    hosting_ips AggregateFunction(uniq, String)
+    hosting_ips AggregateFunction(uniq, String),
+    infra_ips   AggregateFunction(uniq, String)
 )
 ENGINE = AggregatingMergeTree
 PARTITION BY toYYYYMM(ts5)
 ORDER BY (user_id, ts5)
 TTL ts5 + INTERVAL 90 DAY;
+
+-- Same ordering constraint as sub_req_5m below: the column has to exist on an
+-- older target table before the view that writes it is analysed.
+
+ALTER TABLE {db}.user_conn_5m
+    ADD COLUMN IF NOT EXISTS infra_ips AggregateFunction(uniq, String) AFTER hosting_ips;
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS {db}.user_conn_5m_mv TO {db}.user_conn_5m AS
 SELECT
@@ -51,7 +60,22 @@ SELECT
     uniqState(asn) AS asns,
     uniqStateIf(country, country != '') AS countries,
     uniqState(node_id) AS nodes,
-    uniqStateIf(ip, is_hosting = 1) AS hosting_ips
+    uniqStateIf(ip, is_hosting = 1 AND is_infra = 0) AS hosting_ips,
+    uniqStateIf(ip, is_infra = 1) AS infra_ips
+FROM {db}.node_connections
+GROUP BY ts5, user_id;
+
+ALTER TABLE {db}.user_conn_5m_mv MODIFY QUERY
+SELECT
+    toStartOfFiveMinute(ts) AS ts5,
+    user_id,
+    uniqState(ip) AS ips,
+    uniqState(ip_prefix) AS prefixes,
+    uniqState(asn) AS asns,
+    uniqStateIf(country, country != '') AS countries,
+    uniqState(node_id) AS nodes,
+    uniqStateIf(ip, is_hosting = 1 AND is_infra = 0) AS hosting_ips,
+    uniqStateIf(ip, is_infra = 1) AS infra_ips
 FROM {db}.node_connections
 GROUP BY ts5, user_id;
 

@@ -79,8 +79,8 @@ func TestParseSubRequestOptionalFields(t *testing.T) {
 	}
 }
 
-// The panel writes ssrResponseType, the contract calls the field
-// srrResponseType. Both have to land in ResponseType.
+// Panels 3.1.0–3.4.3 write ssrResponseType, 3.4.4 and newer write the
+// contract's srrResponseType. Both have to land in ResponseType.
 func TestParseSubRequestResponseRules(t *testing.T) {
 	base := func() Fields {
 		return Fields{
@@ -91,13 +91,13 @@ func TestParseSubRequestResponseRules(t *testing.T) {
 		}
 	}
 
-	onWire := base()
-	onWire["ssrResponseType"] = "BLOCK"
+	legacy := base()
+	legacy["ssrResponseType"] = "BLOCK"
 
-	perContract := base()
-	perContract["srrResponseType"] = "BLOCK"
+	current := base()
+	current["srrResponseType"] = "BLOCK"
 
-	for name, f := range map[string]Fields{"panel spelling": onWire, "contract spelling": perContract} {
+	for name, f := range map[string]Fields{"pre-3.4.4 spelling": legacy, "3.4.4+ spelling": current} {
 		msg, err := ParseSubRequest(f)
 		if err != nil {
 			t.Fatalf("%s: unexpected error: %v", name, err)

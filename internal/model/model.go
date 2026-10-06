@@ -1,9 +1,10 @@
 // Package model parses the raw Redis Stream payloads published by Remnawave
 // when EXPORT_TO_STREAM_ENABLED=true.
 //
-// Schemas are taken verbatim from @remnawave/backend-contract@3.2.0
-// (models/export-stream/export-stream.schema.ts), which is byte for byte the
-// same file it was in 3.1.1 — the stream contract has not moved since 3.1:
+// Schemas are taken verbatim from the backend contract
+// (libs/contract/models/export-stream/export-stream.schema.ts), which is byte
+// for byte the same file from panel 3.1.1 through 3.4.5 — the stream contract
+// has not moved since 3.1:
 //
 //	ioraw:export:user_usage           RemnawaveUserUsageStreamMessageDto
 //	ioraw:export:subscription_requests RemnawaveSubscriptionRequestStreamMessageDto
@@ -223,11 +224,11 @@ func ParseSubRequest(f Fields) (SubRequest, error) {
 		UserID:    userID,
 		IP:        ip,
 		UserAgent: ua,
-		// The contract calls this srrResponseType, but the panel writes
-		// ssrResponseType — a transposition in the queue processor that is
-		// still there in backend 3.2.0. Prefer what actually lands on the
-		// wire and accept the contract spelling once it gets fixed.
-		ResponseType: f.firstStr("ssrResponseType", "srrResponseType"),
+		// The contract has always called this srrResponseType, but panels
+		// 3.1.0 through 3.4.3 wrote ssrResponseType — a transposition in the
+		// queue processor that 3.4.4 fixed. Entries from before the fix can
+		// still sit in the stream after a panel upgrade, so both are read.
+		ResponseType: f.firstStr("srrResponseType", "ssrResponseType"),
 		RuleName:     rule,
 	}
 	return out, nil

@@ -16,6 +16,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -24,6 +26,7 @@ import (
 	"time"
 
 	"remnanode-exporter/internal/consumer"
+	"remnanode-exporter/internal/dict"
 	"remnanode-exporter/internal/geoip"
 	"remnanode-exporter/internal/model"
 	"remnanode-exporter/internal/schema"
@@ -143,11 +146,41 @@ FROM %s.sub_requests
 GROUP BY ts5, user_id`, testDB(), testDB())); err != nil {
 		t.Fatalf("revert sub_req_5m_mv: %v", err)
 	}
+	// Same for the connection rollup, which learned about own-node addresses.
+	if err := w.Exec(ctx, fmt.Sprintf(`ALTER TABLE %s.user_conn_5m_mv MODIFY QUERY
+SELECT
+    toStartOfFiveMinute(ts) AS ts5,
+    user_id,
+    uniqState(ip) AS ips,
+    uniqState(ip_prefix) AS prefixes,
+    uniqState(asn) AS asns,
+    uniqStateIf(country, country != '') AS countries,
+    uniqState(node_id) AS nodes,
+    uniqStateIf(ip, is_hosting = 1) AS hosting_ips
+FROM %s.node_connections
+GROUP BY ts5, user_id`, testDB(), testDB())); err != nil {
+		t.Fatalf("revert user_conn_5m_mv: %v", err)
+	}
 
 	dropped := []struct{ table, column string }{
 		{"sub_requests", "srr_response_type"},
 		{"sub_requests", "srr_rule_name"},
 		{"sub_req_5m", "blocked"},
+		{"node_connections", "is_infra"},
+		{"user_conn_5m", "infra_ips"},
+		{"dim_users", "traffic_limit_strategy"},
+		{"dim_users", "used_traffic_bytes"},
+		{"dim_users", "lifetime_used_traffic_bytes"},
+		{"dim_users", "telegram_id"},
+		{"dim_users", "internal_squads"},
+		{"dim_users", "created_at"},
+		{"dim_users", "online_at"},
+		{"dim_users", "first_connected_at"},
+		{"dim_users", "sub_revoked_at"},
+		{"dim_users", "last_connected_node_uuid"},
+		{"dim_nodes", "address"},
+		{"dim_nodes", "provider"},
+		{"dim_nodes", "tags"},
 	}
 	for _, d := range dropped {
 		if err := w.Exec(ctx, fmt.Sprintf("ALTER TABLE %s.%s DROP COLUMN IF EXISTS %s",
@@ -172,7 +205,8 @@ GROUP BY ts5, user_id`, testDB(), testDB())); err != nil {
 		}
 	}
 
-	// The rollup has to be recording refused fetches again.
+	// The rollups have to be recording refused fetches and own-node
+	// addresses again.
 	seed(ctx, t, w, log)
 	var blocked uint64
 	if err := w.Conn().QueryRow(ctx, fmt.Sprintf(
@@ -181,6 +215,14 @@ GROUP BY ts5, user_id`, testDB(), testDB())); err != nil {
 	}
 	if blocked == 0 {
 		t.Error("the upgraded materialised view is not counting blocked fetches")
+	}
+	var infra uint64
+	if err := w.Conn().QueryRow(ctx, fmt.Sprintf(
+		"SELECT uniqMerge(infra_ips) FROM %s.user_conn_5m WHERE user_id = 1003", testDB())).Scan(&infra); err != nil {
+		t.Fatalf("read user_conn_5m: %v", err)
+	}
+	if infra == 0 {
+		t.Error("the upgraded materialised view is not counting own-node addresses")
 	}
 }
 
@@ -223,6 +265,32 @@ ORDER BY score DESC`, testDB()))
 	}
 	if got[0].score <= 0 {
 		t.Errorf("top score = %v, want > 0", got[0].score)
+	}
+
+	byUser := func(id uint64) (torrents, devices uint64, score float64) {
+		t.Helper()
+		if err := w.Conn().QueryRow(ctx, fmt.Sprintf(`
+SELECT torrent_reports, hwid_devices, score
+FROM %s.v_user_abuse(from = toDateTime(now() - 7200), to = toDateTime(now() + 600))
+WHERE user_id = ?`, testDB()), id).Scan(&torrents, &devices, &score); err != nil {
+			t.Fatalf("read v_user_abuse for %d: %v", id, err)
+		}
+		return torrents, devices, score
+	}
+
+	// Every seed adds three distinct reports, each written twice; FINAL keeps
+	// the second copy from counting, so the count is a multiple of three.
+	if torrents, _, score := byUser(1002); torrents == 0 || torrents%3 != 0 || score < 30 {
+		t.Errorf("user 1002: torrent_reports = %d, score = %v; want a multiple of 3 and score >= 30", torrents, score)
+	}
+	// Only the newest HWID sync counts: the device deleted since is gone.
+	if _, devices, _ := byUser(1001); devices != 2 {
+		t.Errorf("user 1001: hwid_devices = %d, want 2", devices)
+	}
+	// A chained node's service account: lots of traffic from a datacenter,
+	// but every address is one of the panel's own nodes.
+	if _, _, score := byUser(1003); score != 0 {
+		t.Errorf("user 1003 (own-node account): score = %v, want 0", score)
 	}
 }
 
@@ -329,11 +397,20 @@ func expandMacros(q string) string {
 	return q
 }
 
+// ownNodes stands in for the panel's own node addresses.
+type ownNodes map[string]bool
+
+func (o ownNodes) Contains(ip string) bool { return o[ip] }
+
 // seed writes a small, deliberately shaped dataset:
 //
 //	user 1001 — one subscription, four networks in three countries, one of them
-//	            a hosting ASN, plus scripted subscription fetches (the abuser)
-//	user 1002 — a single network, one client (the normal subscriber)
+//	            a hosting ASN, plus scripted subscription fetches (the abuser);
+//	            two HWID devices, a third deleted in the panel since
+//	user 1002 — a single network, one client (the normal subscriber), but
+//	            caught by the Torrent Blocker three times
+//	user 1003 — a chained node's service account: heavy traffic, connecting
+//	            only from one of the panel's own node addresses
 func seed(ctx context.Context, t *testing.T, w *sink.Writer, log *slog.Logger) {
 	t.Helper()
 	geo := geoip.New(os.Getenv("GEOIP_CITY_DB"), os.Getenv("GEOIP_ASN_DB"), nil, log)
@@ -345,7 +422,7 @@ func seed(ctx context.Context, t *testing.T, w *sink.Writer, log *slog.Logger) {
 	}
 
 	usage := consumer.UserUsageDecoder{}
-	conns := consumer.NodeConnectionsDecoder{Geo: geo}
+	conns := consumer.NodeConnectionsDecoder{Geo: geo, Infra: ownNodes{"203.0.113.7": true}}
 	subs := consumer.SubRequestDecoder{Geo: geo}
 
 	insert := func(dec consumer.Decoder, fields model.Fields) {
@@ -367,7 +444,7 @@ func seed(ctx context.Context, t *testing.T, w *sink.Writer, log *slog.Logger) {
 		})
 		insert(usage, model.Fields{
 			"v": "1", "nodeId": "2", "ts": stamp(off),
-			"records": "1001:10737418240",
+			"records": "1001:10737418240;1003:107374182400",
 		})
 
 		insert(conns, model.Fields{
@@ -383,13 +460,15 @@ func seed(ctx context.Context, t *testing.T, w *sink.Writer, log *slog.Logger) {
 		})
 		insert(conns, model.Fields{
 			"v": "1", "nodeId": "2", "ts": stamp(off),
-			"users": fmt.Sprintf(`[{"userId":"1001","ips":[{"ip":"77.88.55.60","lastSeen":%q}]}]`, stamp(off)),
+			"users": fmt.Sprintf(`[{"userId":"1001","ips":[{"ip":"77.88.55.60","lastSeen":%q}]},
+              {"userId":"1003","ips":[{"ip":"203.0.113.7","lastSeen":%q}]}]`, stamp(off), stamp(off)),
 		})
 
 		insert(subs, model.Fields{
 			"v": "1", "userId": "1001", "requestAt": stamp(off),
 			"requestIp": "8.8.8.8", "userAgent": "curl/8.5.0",
-			// Panels write the transposed spelling; see model.ParseSubRequest.
+			// Panels before 3.4.4 wrote the transposed spelling; see
+			// model.ParseSubRequest.
 			"ssrResponseType": "BLOCK", "srrRuleName": "block-legacy-clients",
 		})
 		insert(subs, model.Fields{
@@ -400,8 +479,46 @@ func seed(ctx context.Context, t *testing.T, w *sink.Writer, log *slog.Logger) {
 		insert(subs, model.Fields{
 			"v": "1", "userId": "1002", "requestAt": stamp(off),
 			"requestIp": "77.88.55.70", "userAgent": "Happ/1.24.0",
-			"ssrResponseType": "XRAY_JSON",
+			"srrResponseType": "XRAY_JSON",
 		})
+	}
+
+	// The normal subscriber turns out to torrent: three reports, each written
+	// twice the way the poller's overlap re-reads them.
+	reportID := uint64(now.UnixNano())
+	var torrents [][]any
+	for i := 0; i < 3; i++ {
+		row := []any{
+			now.Add(time.Duration(-i) * time.Minute), reportID + uint64(i), uint64(1), uint64(1002),
+			"77.88.55.70", "77.88.55.0/24", "RU", "", uint32(13238), "YANDEX LLC", uint8(0),
+			uint8(1), uint32(3600), "tcp:198.51.100.20:6881", "tcp", "bittorrent", "VLESS_REALITY", "BLOCK",
+		}
+		torrents = append(torrents, row, row)
+	}
+	if err := w.Insert(ctx, "torrent_reports",
+		[]string{"ts", "report_id", "node_id", "user_id", "ip", "ip_prefix", "country", "city", "asn",
+			"as_org", "is_hosting", "blocked", "block_seconds", "destination", "network", "protocol",
+			"inbound_tag", "outbound_tag"},
+		torrents); err != nil {
+		t.Fatalf("insert torrent_reports: %v", err)
+	}
+
+	// Two HWID syncs: the older one still lists a device deleted since.
+	hwidCols := []string{"user_id", "hwid", "platform", "os_version", "device_model", "user_agent",
+		"request_ip", "created_at", "updated_at", "synced_at"}
+	device := func(hwid string, synced time.Time) []any {
+		return []any{uint64(1001), hwid, "iOS", "18.0", "iPhone", "Happ/1.24.0", "8.8.8.8", now, now, synced}
+	}
+	older, newest := time.Now().UTC().Add(-time.Minute), time.Now().UTC()
+	if err := w.Insert(ctx, "dim_hwid_devices", hwidCols, [][]any{
+		device("hw-a", older), device("hw-b", older), device("hw-deleted", older),
+	}); err != nil {
+		t.Fatalf("insert dim_hwid_devices: %v", err)
+	}
+	if err := w.Insert(ctx, "dim_hwid_devices", hwidCols, [][]any{
+		device("hw-a", newest), device("hw-b", newest),
+	}); err != nil {
+		t.Fatalf("insert dim_hwid_devices: %v", err)
 	}
 
 	// Dimensions, so the name-resolving views return something readable.
@@ -420,5 +537,127 @@ func seed(ctx context.Context, t *testing.T, w *sink.Writer, log *slog.Logger) {
 			{uint64(2), "22222222-2222-4222-8222-222222222222", "node-2", "NL", now},
 		}); err != nil {
 		t.Fatalf("insert dim_nodes: %v", err)
+	}
+}
+
+// fakePanel answers every endpoint the dictionary syncer calls, the way
+// Remnawave 3.4.5 shapes them. Ids start at 2001 so nothing here collides
+// with the seed; the two torrent reports are reportID and reportID+1.
+func fakePanel(t *testing.T, reportsAt time.Time, reportID int64) *httptest.Server {
+	t.Helper()
+	ts := func(d time.Duration) string { return reportsAt.Add(d).Format(time.RFC3339Nano) }
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/system/metadata":
+			fmt.Fprint(w, `{"response":{"version":"3.4.5"}}`)
+		case "/api/system/configuration":
+			fmt.Fprint(w, `{"response":{"service":{"exportToRedisStream":true},"misc":{"userUsageIgnoreBelowBytes":0}}}`)
+		case "/api/users/stream":
+			fmt.Fprint(w, `{"response":{"hasMore":false,"nextCursor":null,"users":[
+				{"id":2001,"username":"torrenter","status":"ACTIVE","trafficLimitBytes":0,
+				 "trafficLimitStrategy":"NO_RESET","expireAt":"2027-01-01T00:00:00.000Z","telegramId":555,
+				 "tag":null,"hwidDeviceLimit":2,"subRevokedAt":null,"createdAt":"2026-10-01T00:00:00.000Z",
+				 "activeInternalSquads":[{"uuid":"a","name":"Default"}],
+				 "userTraffic":{"usedTrafficBytes":1024,"lifetimeUsedTrafficBytes":2048,
+				  "onlineAt":null,"firstConnectedAt":null,"lastConnectedNodeUuid":null}}]}}`)
+		case "/api/nodes":
+			fmt.Fprint(w, `{"response":[{"id":2001,"uuid":"33333333-3333-4333-8333-333333333333","name":"bridge-1",
+				"countryCode":"FI","address":"198.51.100.77","tags":["BRIDGE"],"provider":{"name":"Hetzner"},
+				"ips":[{"ip":"203.0.113.77","status":"OUTBOUND"}]}]}`)
+		case "/api/hwid/devices":
+			fmt.Fprint(w, `{"response":{"total":1,"devices":[{"hwid":"hw-2001","userId":2001,"platform":"Android",
+				"osVersion":"15","deviceModel":"Pixel","userAgent":"v2rayNG/1.9","requestIp":"77.88.55.80",
+				"createdAt":"2026-10-01T00:00:00.000Z","updatedAt":"2026-10-02T00:00:00.000Z"}]}}`)
+		case "/api/node-plugins/torrent-blocker":
+			if r.URL.Query().Get("start") != "0" {
+				fmt.Fprint(w, `{"response":{"total":2,"records":[]}}`)
+				return
+			}
+			report := func(id int64, at string) string {
+				return fmt.Sprintf(`{"id":%d,"userId":2001,"nodeId":2001,"createdAt":%q,
+					"report":{"actionReport":{"blocked":true,"ip":"77.88.55.80","blockDuration":600},
+					"xrayReport":{"protocol":"bittorrent","network":"udp","destination":"udp:198.51.100.30:6881",
+					"inboundTag":"VLESS","outboundTag":"BLOCK"}}}`, id, at)
+			}
+			fmt.Fprintf(w, `{"response":{"total":2,"records":[%s,%s]}}`,
+				report(reportID+1, ts(0)), report(reportID, ts(-time.Minute)))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+// TestPanelSync runs the dictionary syncer against a fake panel and a real
+// ClickHouse: dimensions, HWID devices, own-node addresses and torrent reports
+// all have to land, and repeated torrent polls must not double-count.
+func TestPanelSync(t *testing.T) {
+	w, log := connect(t)
+	// The syncer runs on its own context, cancelled midway; the assertions
+	// keep querying after that.
+	ctx := context.Background()
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Newer than anything the seed wrote, so the poll cursor (the newest
+	// stored report) cannot hide these.
+	// The database outlives the test, so the reports are unique to this run.
+	reportID := time.Now().UnixNano()
+	srv := fakePanel(t, time.Now().UTC().Add(time.Hour), reportID)
+	defer srv.Close()
+	ours := fmt.Sprintf("user_id = 2001 AND report_id IN (%d, %d)", reportID, reportID+1)
+
+	syncer := dict.New(dict.Options{
+		APIURL:          srv.URL,
+		APIToken:        "token",
+		Interval:        time.Hour,
+		TorrentInterval: 100 * time.Millisecond,
+		Geo:             geoip.New("", "", nil, log),
+	}, w, log)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = syncer.Run(runCtx)
+	}()
+
+	count := func(query string) uint64 {
+		t.Helper()
+		var n uint64
+		query = strings.ReplaceAll(query, "{ours}", ours)
+		if err := w.Conn().QueryRow(ctx, fmt.Sprintf(query, testDB())).Scan(&n); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+		return n
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for count("SELECT count() FROM %s.v_torrent_reports WHERE {ours}") < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("torrent reports never arrived")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	// Let a few more polls re-read the same two reports.
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+	<-done
+
+	if n := count("SELECT count() FROM %s.v_torrent_reports WHERE {ours}"); n != 2 {
+		t.Errorf("v_torrent_reports holds %d rows for the two reports, want 2", n)
+	}
+	if n := count("SELECT count() FROM %s.v_torrent_reports WHERE {ours} AND username = 'torrenter' AND node_name = 'bridge-1'"); n != 2 {
+		t.Errorf("torrent reports did not resolve user and node names (%d rows)", n)
+	}
+	if n := count("SELECT count() FROM %s.v_users WHERE user_id = 2001 AND telegram_id = 555 AND has(internal_squads, 'Default') AND traffic_limit_strategy = 'NO_RESET'"); n != 1 {
+		t.Error("dim_users is missing the enriched user fields")
+	}
+	if n := count("SELECT count() FROM %s.v_nodes WHERE node_id = 2001 AND provider = 'Hetzner' AND has(tags, 'BRIDGE')"); n != 1 {
+		t.Error("dim_nodes is missing the provider or the tags")
+	}
+	if n := count("SELECT count() FROM %s.v_hwid_devices WHERE user_id = 2001 AND hwid = 'hw-2001' AND platform = 'Android'"); n != 1 {
+		t.Error("the HWID device did not land in v_hwid_devices")
+	}
+	for _, ip := range []string{"198.51.100.77", "203.0.113.77"} {
+		if !syncer.Infra().Contains(ip) {
+			t.Errorf("own-node address %s is missing from the infra set", ip)
+		}
 	}
 }

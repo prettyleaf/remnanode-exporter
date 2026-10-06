@@ -1,7 +1,7 @@
 {
   "uid": "rw-abuse-radar",
   "title": "Remnawave — Abuse Radar",
-  "description": "Account sharing, resale and proxy chaining. Combines node connection snapshots (every ~5 min), subscription fetches and traffic into one score.",
+  "description": "Account sharing, resale, proxy chaining and torrenting. Combines node connection snapshots (every ~5 min), subscription fetches, traffic and Torrent Blocker reports into one score.",
   "tags": [
     "remnawave"
   ],
@@ -466,7 +466,7 @@
       "id": 10,
       "type": "table",
       "title": "Abuse score",
-      "description": "score = GB moved + 2 per extra /24 network + 5 per extra country + 2 per extra ASN + 4 per hosting address + 2 per extra User-Agent + 0.2 per subscription fetch over 20 + 0.5 per scripted fetch. Tune it in internal/schema/sql/03_views.sql (v_user_abuse).",
+      "description": "score = GB moved + 2 per extra /24 network + 5 per extra country + 2 per extra ASN + 4 per hosting address + 2 per extra User-Agent + 0.2 per subscription fetch over 20 + 0.5 per scripted fetch + 0.5 per refused fetch over 5 + 10 per torrent caught by the Torrent Blocker. An account seen only from your own node addresses (a chained node's service account) scores 0. Tune it in internal/schema/sql/03_views.sql (v_user_abuse).",
       "datasource": {
         "type": "grafana-clickhouse-datasource",
         "uid": "${ds}"
@@ -487,7 +487,7 @@
           "editorType": "sql",
           "format": 1,
           "pluginVersion": "4.5.1",
-          "rawSql": "SELECT\n    username,\n    status,\n    tag,\n    score,\n    gigabytes,\n    prefixes AS networks,\n    countries,\n    asns,\n    hosting_ips,\n    nodes,\n    ips,\n    sub_requests,\n    sub_uas,\n    sub_blocked,\n    hwid_device_limit\nFROM remnawave.v_user_abuse(from = $__fromTime, to = $__toTime)\nWHERE score > 0\nORDER BY score DESC\nLIMIT 200"
+          "rawSql": "SELECT\n    username,\n    status,\n    tag,\n    arrayStringConcat(internal_squads, ', ') AS squads,\n    score,\n    gigabytes,\n    prefixes AS networks,\n    countries,\n    asns,\n    hosting_ips,\n    torrent_reports AS torrents,\n    nodes,\n    ips,\n    sub_requests,\n    sub_uas,\n    sub_blocked,\n    hwid_devices,\n    hwid_device_limit\nFROM remnawave.v_user_abuse(from = $__fromTime, to = $__toTime)\nWHERE score > 0\nORDER BY score DESC\nLIMIT 200"
         }
       ],
       "fieldConfig": {
@@ -652,6 +652,36 @@
                     {
                       "color": "red",
                       "value": 3
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "torrents"
+            },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": 1
                     }
                   ]
                 }
@@ -888,7 +918,7 @@
       "id": 30,
       "type": "table",
       "title": "Connections from datacenter / hosting networks",
-      "description": "A subscriber connecting from a VPS is not a normal subscriber.",
+      "description": "A subscriber connecting from a VPS is not a normal subscriber. Addresses of your own nodes (chained bridges) are left out.",
       "datasource": {
         "type": "grafana-clickhouse-datasource",
         "uid": "${ds}"
@@ -909,7 +939,7 @@
           "editorType": "sql",
           "format": 1,
           "pluginVersion": "4.5.1",
-          "rawSql": "SELECT\n    username,\n    node_name,\n    ip,\n    country,\n    city,\n    asn,\n    as_org,\n    max(last_seen) AS last_seen,\n    count() AS snapshots\nFROM remnawave.v_connections\nWHERE $__timeFilter(ts) AND is_hosting = 1\nGROUP BY username, node_name, ip, country, city, asn, as_org\nORDER BY last_seen DESC\nLIMIT 200"
+          "rawSql": "SELECT\n    username,\n    node_name,\n    ip,\n    country,\n    city,\n    asn,\n    as_org,\n    max(last_seen) AS last_seen,\n    count() AS snapshots\nFROM remnawave.v_connections\nWHERE $__timeFilter(ts) AND is_hosting = 1 AND is_infra = 0\nGROUP BY username, node_name, ip, country, city, asn, as_org\nORDER BY last_seen DESC\nLIMIT 200"
         }
       ],
       "fieldConfig": {
@@ -1074,6 +1104,153 @@
           "mappings": []
         },
         "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "fields": ""
+        },
+        "cellHeight": "sm",
+        "sortBy": []
+      }
+    },
+    {
+      "id": 50,
+      "type": "table",
+      "title": "Accounts caught torrenting",
+      "description": "Reports from the node Torrent Blocker plugin, pulled from the panel API. Needs the node-plugins:torrent-blocker-reports scope on the token.",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${ds}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 47,
+        "w": 8,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${ds}"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "pluginVersion": "4.5.1",
+          "rawSql": "SELECT\n    username,\n    count() AS reports,\n    uniqExact(node_id) AS nodes,\n    uniqExact(ip) AS ips,\n    max(ts) AS last_report\nFROM remnawave.v_torrent_reports\nWHERE $__timeFilter(ts)\nGROUP BY username\nORDER BY reports DESC\nLIMIT 100"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true,
+            "inspect": false
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "fields": ""
+        },
+        "cellHeight": "sm",
+        "sortBy": []
+      }
+    },
+    {
+      "id": 51,
+      "type": "table",
+      "title": "Torrent Blocker reports",
+      "description": "Every torrent the Torrent Blocker caught: who, from where, on which node, and what they were reaching.",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${ds}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 47,
+        "w": 16,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${ds}"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "pluginVersion": "4.5.1",
+          "rawSql": "SELECT\n    ts,\n    username,\n    node_name,\n    ip,\n    country,\n    as_org,\n    destination,\n    protocol,\n    inbound_tag,\n    if(blocked = 1, 'blocked', 'logged') AS action,\n    block_seconds\nFROM remnawave.v_torrent_reports\nWHERE $__timeFilter(ts)\nORDER BY ts DESC\nLIMIT 500"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true,
+            "inspect": false
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "block_seconds"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "showHeader": true,
