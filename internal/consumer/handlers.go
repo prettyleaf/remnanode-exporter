@@ -6,7 +6,7 @@ import (
 	"remnanode-exporter/internal/ua"
 )
 
-// ClickHouse table names. They mirror the DDL in deploy/clickhouse/init.
+// ClickHouse table names. They mirror the DDL in internal/schema/sql.
 const (
 	TableUserUsage       = "user_usage"
 	TableSubRequests     = "sub_requests"
@@ -74,9 +74,16 @@ func (d SubRequestDecoder) Decode(f model.Fields) ([][]any, error) {
 	}}, nil
 }
 
+// IPSet answers whether an address belongs to the panel's own infrastructure.
+type IPSet interface {
+	Contains(ip string) bool
+}
+
 // NodeConnectionsDecoder flattens a snapshot into one row per user/IP pair.
 type NodeConnectionsDecoder struct {
 	Geo *geoip.Resolver
+	// Infra holds the addresses of the panel's own nodes. Nil marks nothing.
+	Infra IPSet
 }
 
 func (NodeConnectionsDecoder) Stream() string { return model.StreamNodeConnections }
@@ -84,7 +91,7 @@ func (NodeConnectionsDecoder) Table() string  { return TableNodeConnections }
 func (NodeConnectionsDecoder) Columns() []string {
 	return []string{
 		"ts", "node_id", "user_id", "ip", "ip_prefix", "last_seen",
-		"country", "city", "asn", "as_org", "is_hosting",
+		"country", "city", "asn", "as_org", "is_hosting", "is_infra",
 	}
 }
 
@@ -109,6 +116,7 @@ func (d NodeConnectionsDecoder) Decode(f model.Fields) ([][]any, error) {
 				geo.ASN,
 				geo.ASOrg,
 				boolToUInt8(geo.IsHosting),
+				boolToUInt8(d.Infra != nil && d.Infra.Contains(ip.IP)),
 			})
 		}
 	}

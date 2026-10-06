@@ -36,11 +36,15 @@ type Config struct {
 	GeoIPReload   time.Duration
 
 	// Remnawave panel API, used to resolve the numeric user and node ids the
-	// streams carry into names, and to report the panel's export settings at
-	// startup. Node ids need a panel on 3.1.0 or newer.
+	// streams carry into names, to report the panel's export settings at
+	// startup, and to pull HWID devices and Torrent Blocker reports. Node ids
+	// need a panel on 3.1.0 or newer.
 	APIURL      string
 	APIToken    string
 	DictRefresh time.Duration
+	// TorrentPoll paces the Torrent Blocker report poll, which is cheap when
+	// nothing new arrived and is what makes a torrent show up quickly.
+	TorrentPoll time.Duration
 
 	MetricsAddr string
 	LogLevel    string
@@ -77,6 +81,7 @@ func Load() (Config, error) {
 		APIURL:      strings.TrimRight(env("REMNAWAVE_API_URL", ""), "/"),
 		APIToken:    env("REMNAWAVE_API_TOKEN", ""),
 		DictRefresh: envDuration("DICT_REFRESH_INTERVAL", 5*time.Minute),
+		TorrentPoll: envDuration("TORRENT_POLL_INTERVAL", time.Minute),
 
 		// 9101 is deliberately avoided: the common Remnawave monitoring setup
 		// already runs cAdvisor there on every host.
@@ -95,6 +100,12 @@ func Load() (Config, error) {
 	}
 	if len(c.ClickHouseAddrs) == 0 {
 		return c, fmt.Errorf("CLICKHOUSE_ADDR must not be empty")
+	}
+	if c.DictRefresh <= 0 {
+		return c, fmt.Errorf("DICT_REFRESH_INTERVAL must be > 0")
+	}
+	if c.TorrentPoll <= 0 {
+		return c, fmt.Errorf("TORRENT_POLL_INTERVAL must be > 0")
 	}
 	return c, nil
 }

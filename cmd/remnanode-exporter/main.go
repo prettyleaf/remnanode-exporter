@@ -1,6 +1,6 @@
 // Command remnanode-exporter ships the Remnawave Redis export streams into
 // ClickHouse and enriches every address with MaxMind GeoLite2 data.
-// Verified against panel 3.1.x and 3.2.0.
+// Verified against panel 3.1.x through 3.4.5.
 package main
 
 import (
@@ -86,10 +86,20 @@ func run() error {
 		return err
 	}
 
+	// Built before the decoders: the node refresh it runs fills the set of the
+	// panel's own addresses that the connection decoder flags.
+	syncer := dict.New(dict.Options{
+		APIURL:          cfg.APIURL,
+		APIToken:        cfg.APIToken,
+		Interval:        cfg.DictRefresh,
+		TorrentInterval: cfg.TorrentPoll,
+		Geo:             geo,
+	}, writer, log)
+
 	decoders := []consumer.Decoder{
 		consumer.UserUsageDecoder{},
 		consumer.SubRequestDecoder{Geo: geo},
-		consumer.NodeConnectionsDecoder{Geo: geo},
+		consumer.NodeConnectionsDecoder{Geo: geo, Infra: syncer.Infra()},
 	}
 	workerOpts := consumer.Options{
 		Group:              cfg.RedisGroup,
@@ -122,11 +132,6 @@ func run() error {
 		geo.Watch(ctx, cfg.GeoIPReload)
 	}()
 
-	syncer := dict.New(dict.Options{
-		APIURL:   cfg.APIURL,
-		APIToken: cfg.APIToken,
-		Interval: cfg.DictRefresh,
-	}, writer, log)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()

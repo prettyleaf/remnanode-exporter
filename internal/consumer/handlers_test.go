@@ -93,3 +93,38 @@ func TestNodeConnectionsDecoderSkipsEmptyUsers(t *testing.T) {
 		t.Errorf("got %d rows, want 0", len(rows))
 	}
 }
+
+type stubIPSet map[string]bool
+
+func (s stubIPSet) Contains(ip string) bool { return s[ip] }
+
+// An address of one of the panel's own nodes is flagged, everything else is
+// not, and a decoder without a set flags nothing at all.
+func TestNodeConnectionsDecoderFlagsInfraAddresses(t *testing.T) {
+	fields := model.Fields{
+		"v": "1", "nodeId": "5", "ts": "2026-07-16T12:00:00.000Z",
+		"users": `[{"userId":"1","ips":[{"ip":"203.0.113.7","lastSeen":"2026-07-16T11:59:00.000Z"},` +
+			`{"ip":"1.2.3.4","lastSeen":"2026-07-16T11:59:10.000Z"}]}]`,
+	}
+	cols := NodeConnectionsDecoder{}.Columns()
+	infraCol := len(cols) - 1
+	if cols[infraCol] != "is_infra" {
+		t.Fatalf("last column = %q, want is_infra", cols[infraCol])
+	}
+
+	rows, err := NodeConnectionsDecoder{Geo: testGeo(), Infra: stubIPSet{"203.0.113.7": true}}.Decode(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows[0][infraCol] != uint8(1) || rows[1][infraCol] != uint8(0) {
+		t.Errorf("is_infra = %v, %v; want 1, 0", rows[0][infraCol], rows[1][infraCol])
+	}
+
+	rows, err = NodeConnectionsDecoder{Geo: testGeo()}.Decode(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows[0][infraCol] != uint8(0) {
+		t.Errorf("is_infra without a set = %v, want 0", rows[0][infraCol])
+	}
+}
